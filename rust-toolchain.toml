@@ -1,0 +1,5 @@
+[toolchain]
+channel = "1.84"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+targets = ["aarch64-unknown-linux-gnu"]
+profile = "minimal"
