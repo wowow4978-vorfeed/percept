@@ -241,9 +241,182 @@ Mechanics:
 - `describe_sources()` surfaces the effective policy per source so the LLM (and operators) know how far back it can ask.
 - No event-level "pinned" / "do-not-evict" flag in v1 — retention is purely policy-driven. Producers can re-emit important events under a higher-retention `kind`.
 
-## 12. Open questions / decisions deferred
-- **Descriptor lifecycle:** producer-pushed vs. config-pinned vs. both. Leaning both, with config winning on conflict.
-- **Schema enforcement:** soft-fail vs. quarantine queue for invalid `semantic` payloads.
+## 12. Configuration
+
+### 12.1 Format and layering
+- **Format:** TOML.
+- **Layering:** single `percept.toml` for simple deployments; `conf.d/*.toml` files are merged (later files win) for larger ones.
+- **Secrets:** referenced via `*_env` or `*_file`. Inline credentials are a config error.
+- **Validation:** `percept config check` validates without starting the server; runtime startup also fails fast with line numbers.
+- **Reload:** v1 is restart-only. No hot reload.
+
+### 12.2 Top-level layout
+```toml
+[server]                # data_dir, profile
+[mcp]                   # listener + auth
+[storage]               # sweeper cadence, embedding defaults
+[[retention]]           # repeatable, matched by source_id / kind
+
+[[mqtt]]                # one block per broker
+[[mqtt.subscription]]   # nested
+
+[[ble]]                 # one block per HCI adapter
+[[ble.device]]          # known / bonded device
+
+[[http_token]]          # per-token ingest scopes
+
+[[ros2]]                # ROS2 bridge
+
+[[source]]              # SourceDescriptor (pinned)
+[[kind]]                # KindDescriptor (pinned)
+```
+
+### 12.3 Server, MCP, storage
+```toml
+[server]
+data_dir = "/var/lib/percept"
+profile  = "edge"                       # "edge" | "server"
+
+[mcp]
+listen    = "0.0.0.0:7878"
+transport = "http-sse"
+auth      = { token_env = "PERCEPT_MCP_TOKEN" }
+
+[storage]
+sweeper_interval = "1h"
+embed_default    = false                # opt-in per kind/source
+
+[[retention]]
+match.kind = "ble.advert"
+max_age    = "24h"
+
+[[retention]]
+match.source_id = "cam.front_door"
+max_age         = "30d"
+```
+
+### 12.4 MQTT
+Multiple brokers; each has nested subscriptions.
+
+```toml
+[[mqtt]]
+id        = "house-broker"
+url       = "mqtts://broker.lan:8883"
+client_id = "percept-1"
+credentials = { user = "percept", password_env = "MQTT_PASS" }
+tls         = { ca_file = "/etc/percept/ca.pem", insecure = false }
+
+[[mqtt.subscription]]
+topic              = "home/+/temp"
+source_id_template = "temp.{+1}"            # {+1}, {+2}, ... = ordered `+` captures
+kind               = "temperature"          # static OR omit and use kind_field
+payload            = "json"                 # "json" | "raw" | "hex" | "csv"
+qos                = 1
+
+[[mqtt.subscription]]
+topic              = "cams/+/events"
+source_id_template = "cam.{+1}"
+kind_field         = "$.event_type"         # JSONPath into the decoded payload
+payload            = "json"
+```
+
+Rules:
+- **Topic captures** use template syntax only: `{+1}`, `{+2}`, ... for `+` wildcards in order; `{#}` for the `#` tail. No regex.
+- **`kind` resolution order:** explicit `kind` > `kind_field` JSONPath > descriptor default. If none resolves, event is dropped + counted.
+- **Built-in decoders (v1):** `json`, `raw`, `hex`, `csv`. Plugin surface is deferred.
+
+### 12.5 BLE
+Two modes.
+
+**Scan (passive)** — adverts become events. No pairing.
+```toml
+[[ble]]
+adapter    = "hci0"
+mode       = "scan"
+duplicates = true
+
+[[ble.device]]
+mac        = "AA:BB:CC:DD:EE:FF"
+source_id  = "weight.bathroom"
+kind       = "weight"
+decoder    = "miscale-v2"
+```
+Unknown MACs land under `source_id=ble.<mac>`, `kind=ble.advert`.
+
+**GATT (bonded)** — connect to already-bonded devices and subscribe to characteristics.
+```toml
+[[ble]]
+adapter = "hci0"
+mode    = "gatt"
+
+[[ble.device]]
+mac          = "C0:FF:EE:00:11:22"
+source_id    = "hrm.chest"
+kind         = "heart_rate"
+require_bond = true
+poll         = "notify"
+
+[[ble.device.gatt]]
+service_uuid = "0000180d-0000-1000-8000-00805f9b34fb"
+char_uuid    = "00002a37-0000-1000-8000-00805f9b34fb"
+decoder      = "ble-hrm-standard"
+```
+**Pairing is out of scope for Percept.** Bond the device via the OS (`bluetoothctl` on Linux/BlueZ); in GATT mode with `require_bond = true`, Percept refuses to connect to an unbonded device. A helper command `percept ble pair <mac>` is a thin wrapper around the OS pairing tool and writes nothing to Percept's own state.
+
+### 12.6 HTTP / WebSocket ingest
+Single listener. Per-token scopes gate which `source_id`s and `kind`s a producer may write. Default-deny — a token with no allowlist writes nothing.
+
+```toml
+[[http_token]]
+name             = "front-door-cam"
+token_env        = "PERCEPT_TOKEN_FRONT_DOOR"
+allow_source_ids = ["cam.front_door", "cam.front_door.*"]
+allow_kinds      = ["object_detected", "scene_description"]
+rate_limit       = "100/s"
+```
+
+Tokens **cannot push SourceDescriptors** in v1 — descriptor pinning is config-only. (A future opt-in flag will unlock producer-side descriptor registration.)
+
+### 12.7 ROS2 / Foxglove
+```toml
+[[ros2]]
+node_name = "percept_bridge"
+domain_id = 42
+
+[[ros2.subscription]]
+topic              = "/camera/detections"
+msg_type           = "vision_msgs/msg/Detection2DArray"
+source_id_template = "ros.{topic_basename}"
+kind               = "object_detected"
+```
+
+### 12.8 Descriptor pinning
+Pinned descriptors live in config and are the only source in v1. Producer-pushed descriptors are deferred (see §12.6).
+
+```toml
+[[kind]]
+name         = "temperature"
+units        = "celsius"
+description  = "Ambient temperature reading."
+usage        = "Use for 'is it cold/hot' questions; cross-check with humidity if present."
+caveats      = "Some sources report Fahrenheit despite this kind; check the source override."
+
+[[source]]
+id          = "cam.front_door"
+kinds       = ["object_detected", "scene_description"]
+description = "Reolink camera mounted above front porch, 1080p, ~110° FOV."
+usage       = "Use for 'who/what is at the front door' and recent activity."
+caveats     = "Heavy false positives at dusk; rain drops trigger 'person' occasionally."
+location    = "front porch"
+freshness_ttl_ms = 60000
+```
+
+### 12.9 Failure modes
+- **Decoding error / unresolved `kind` / unauthorized token:** event dropped, counter incremented (per source, per reason). No quarantine table in v1.
+- **Schema validation against `semantic_schema`:** soft-fail — event is stored with a `_schema_invalid = true` flag so the LLM/operator can still see what arrived. (See §5.2.)
+- **All failure counters** are exposed via `/metrics` and surfaced in `describe_sources()` as a recent-error summary.
+
+## 13. Open questions / decisions deferred
 - **Embedding policy:** which kinds embed by default; truncation rules for large payloads.
 - **Replication semantics** for hub-and-spoke: at-least-once with idempotent `(source_id, ts_ms_utc, seq)` dedupe is the working assumption.
 - **Descriptor history:** do `get_window` results carry the descriptor that was live at event time, or the current one? v1: current; v2: optional point-in-time.
