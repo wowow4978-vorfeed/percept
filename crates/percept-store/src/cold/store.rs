@@ -266,6 +266,142 @@ impl ColdStore {
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
         Ok(u64::try_from(n).unwrap_or(0))
     }
+
+    /// Distinct `(source_id, kind)` pairs currently present in the store.
+    /// Used by the retention sweeper.
+    pub fn distinct_source_kind_pairs(&self) -> Result<Vec<(String, String)>, ColdError> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare_cached("SELECT DISTINCT source_id, kind FROM events ORDER BY 1, 2")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Count events for a single `(source_id, kind)` pair.
+    pub fn count_for_pair(&self, source_id: &str, kind: &str) -> Result<i64, ColdError> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE source_id = ? AND kind = ?",
+            params![source_id, kind],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Drop events for `(source_id, kind)` older than `cutoff_ms`. With
+    /// `dry_run = true` returns how many would be dropped without
+    /// modifying anything.
+    pub fn sweep_max_age(
+        &self,
+        source_id: &str,
+        kind: &str,
+        cutoff_ms: i64,
+        dry_run: bool,
+    ) -> Result<u64, ColdError> {
+        let conn = self.conn.lock();
+        if dry_run {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM events
+                  WHERE source_id = ? AND kind = ? AND ts_ms_utc < ?",
+                params![source_id, kind, cutoff_ms],
+                |r| r.get(0),
+            )?;
+            return Ok(u64::try_from(n).unwrap_or(0));
+        }
+        let affected = conn.execute(
+            "DELETE FROM events
+              WHERE source_id = ? AND kind = ? AND ts_ms_utc < ?",
+            params![source_id, kind, cutoff_ms],
+        )?;
+        Ok(affected as u64)
+    }
+
+    /// Keep only the most recent `keep_last` events for the pair; drop
+    /// the rest. Best-effort, expensive on hot pairs — warning lives in
+    /// the sweeper.
+    pub fn sweep_max_count(
+        &self,
+        source_id: &str,
+        kind: &str,
+        keep_last: i64,
+        dry_run: bool,
+    ) -> Result<u64, ColdError> {
+        let conn = self.conn.lock();
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE source_id = ? AND kind = ?",
+            params![source_id, kind],
+            |r| r.get(0),
+        )?;
+        let drop_count = (total - keep_last).max(0);
+        if dry_run || drop_count == 0 {
+            return Ok(u64::try_from(drop_count).unwrap_or(0));
+        }
+        let affected = conn.execute(
+            "DELETE FROM events
+              WHERE event_id IN (
+                  SELECT event_id FROM events
+                   WHERE source_id = ? AND kind = ?
+                   ORDER BY ts_ms_utc ASC, event_id ASC
+                   LIMIT ?
+              )",
+            params![source_id, kind, drop_count],
+        )?;
+        Ok(affected as u64)
+    }
+
+    /// Drop newest-to-oldest until the cumulative semantic byte count
+    /// fits within `max_bytes`. Best-effort.
+    pub fn sweep_max_bytes(
+        &self,
+        source_id: &str,
+        kind: &str,
+        max_bytes: i64,
+        dry_run: bool,
+    ) -> Result<u64, ColdError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, LENGTH(semantic) FROM events
+              WHERE source_id = ? AND kind = ?
+              ORDER BY ts_ms_utc DESC, event_id DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![source_id, kind], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut running: i64 = 0;
+        let mut to_drop: Vec<String> = Vec::new();
+        for (event_id, bytes) in rows {
+            running = running.saturating_add(bytes);
+            if running > max_bytes {
+                to_drop.push(event_id);
+            }
+        }
+        if dry_run {
+            return Ok(u64::try_from(to_drop.len()).unwrap_or(0));
+        }
+        if to_drop.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = std::iter::repeat("?")
+            .take(to_drop.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM events WHERE event_id IN ({placeholders})");
+        let n = conn.execute(
+            &sql,
+            rusqlite::params_from_iter(to_drop.iter().map(String::as_str)),
+        )?;
+        Ok(n as u64)
+    }
 }
 
 /// Per-call hard limit per DECISIONS §9.

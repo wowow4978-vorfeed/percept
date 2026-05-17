@@ -5,6 +5,7 @@
 
 pub mod cold;
 mod hot_ring;
+pub mod retention;
 pub mod vector;
 
 pub use cold::{
@@ -12,6 +13,10 @@ pub use cold::{
     Cursor, CursorError, WindowFilter, MAX_WINDOW_LIMIT,
 };
 pub use hot_ring::{HotRingConfig, HotRings, Snapshot};
+pub use retention::{
+    resolve_effective, sweep, EffectiveRetention, PerPairReport, RetentionPolicy, SweepError,
+    SweepReport, EXPENSIVE_REWRITE_THRESHOLD,
+};
 pub use vector::{
     cosine_similarity, truncate_utf8, EmbedSelector, Embedder, EmbedderConfig, EmbedderMetrics,
     EmbedderTask, HashEmbedder, SearchHit, SharedEmbedder, VectorError, VectorFilter, VectorIndex,

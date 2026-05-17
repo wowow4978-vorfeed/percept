@@ -54,6 +54,7 @@ async fn spawn_with_vector(
         cold_store,
         vector_index: pipeline.vector_index.clone(),
         embedder: embedder_for_state,
+        retention_policies: Arc::new(Vec::new()),
         metrics: pipeline.metrics.clone(),
     };
 
@@ -1022,4 +1023,84 @@ async fn metrics_includes_embedder_counters_when_vector_enabled() {
         body.contains("percept_embedder_events_embedded_total"),
         "got: {body}"
     );
+}
+
+#[tokio::test]
+async fn describe_sources_includes_effective_retention() {
+    // Spawn with a custom retention policy attached to the McpState.
+    let mut auth = Auth::new();
+    auth.insert(
+        INGEST_TOKEN.to_string(),
+        TokenScope::build("test", &["*".into()], &["*".into()], None).unwrap(),
+    );
+    let schemas = Arc::new(SchemaIndex::default());
+    let cold_store = Some(Arc::new(
+        percept_store::ColdStore::open_in_memory().unwrap(),
+    ));
+    let pipeline = Pipeline::spawn(
+        Arc::new(auth),
+        schemas,
+        cold_store.clone(),
+        None,
+        PipelineConfig::default(),
+    );
+
+    let policies = Arc::new(vec![percept_store::RetentionPolicy {
+        match_source_id: Some("cam.front".into()),
+        max_age: Some(std::time::Duration::from_secs(86_400)),
+        ..Default::default()
+    }]);
+
+    let mcp_state = McpState {
+        token: Arc::new(MCP_TOKEN.to_string()),
+        registry: Arc::new(DescriptorRegistry::new(vec![
+            rd("cam.front", "object_detected", None),
+            rd("cam.back", "object_detected", None),
+        ])),
+        hot_rings: pipeline.hot_rings.clone(),
+        cold_store,
+        vector_index: None,
+        embedder: None,
+        retention_policies: policies,
+        metrics: pipeline.metrics.clone(),
+    };
+
+    let app =
+        percept_ingest::router(pipeline.http_state.clone()).merge(percept::mcp::router(mcp_state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let _server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+
+    let resp = post_mcp(
+        &base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "describe_sources", "arguments": {} }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let sources = body["result"]["structuredContent"]["sources"]
+        .as_array()
+        .unwrap();
+    let front = sources
+        .iter()
+        .find(|s| s["source_id"] == "cam.front")
+        .unwrap();
+    assert_eq!(
+        front["effective_retention"]["max_age_ms"], 86_400_000_i64,
+        "got: {front}"
+    );
+    let back = sources
+        .iter()
+        .find(|s| s["source_id"] == "cam.back")
+        .unwrap();
+    // No policy applies to cam.back → no effective_retention field.
+    assert!(back.get("effective_retention").is_none(), "got: {back}");
 }

@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use percept_ingest::Metrics;
-use percept_store::{ColdStore, Embedder, HotRings, VectorIndex};
+use percept_store::{ColdStore, Embedder, HotRings, RetentionPolicy, VectorIndex};
 use serde_json::json;
 
 use super::protocol::{
@@ -28,6 +28,7 @@ pub struct McpState {
     pub cold_store: Option<Arc<ColdStore>>,
     pub vector_index: Option<Arc<VectorIndex>>,
     pub embedder: Option<Arc<dyn Embedder>>,
+    pub retention_policies: Arc<Vec<RetentionPolicy>>,
     pub metrics: Arc<Metrics>,
 }
 
@@ -154,7 +155,7 @@ fn dispatch_call(
                 Ok(a) => a,
                 Err(e) => return RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
             };
-            match tools::describe_sources(&s.registry, &s.metrics, parsed) {
+            match tools::describe_sources(&s.registry, &s.metrics, &s.retention_policies, parsed) {
                 Ok(v) => RpcResponse::ok(
                     id,
                     serde_json::to_value(CallResult::structured(v)).expect("serializable"),

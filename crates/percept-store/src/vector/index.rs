@@ -199,6 +199,40 @@ impl VectorIndex {
         self.len() == 0
     }
 
+    /// Drop vectors for `(source_id, kind)` older than `cutoff_ms`. With
+    /// `dry_run = true` returns how many would be dropped without
+    /// modifying anything (used by the retention sweeper).
+    pub fn sweep_max_age(
+        &self,
+        source_id: &str,
+        kind: &str,
+        cutoff_ms: i64,
+        dry_run: bool,
+    ) -> Result<u64, VectorError> {
+        let conn = self.conn.lock();
+        if dry_run {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM vectors
+                  WHERE source_id = ? AND kind = ? AND ts_ms_utc < ?",
+                params![source_id, kind, cutoff_ms],
+                |r| r.get(0),
+            )?;
+            return Ok(u64::try_from(n).unwrap_or(0));
+        }
+        let affected = conn.execute(
+            "DELETE FROM vectors
+              WHERE source_id = ? AND kind = ? AND ts_ms_utc < ?",
+            params![source_id, kind, cutoff_ms],
+        )?;
+        drop(conn);
+        // Mirror the delete in memory so search_kn reflects it.
+        let mut inner = self.inner.write();
+        inner
+            .rows
+            .retain(|r| !(r.source_id == source_id && r.kind == kind && r.ts_ms_utc < cutoff_ms));
+        Ok(affected as u64)
+    }
+
     /// Filtered kNN by cosine. Returns at most `top_k` hits, sorted by
     /// descending similarity.
     pub fn search_kn(

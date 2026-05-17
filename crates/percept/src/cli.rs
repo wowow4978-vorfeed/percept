@@ -1,7 +1,9 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use percept_store::{sweep, ColdStore, VectorIndex};
 
 use crate::{config, server};
 
@@ -26,8 +28,21 @@ pub enum Command {
         #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
         config: PathBuf,
     },
+    /// Retention administration.
+    #[command(subcommand)]
+    Retention(RetentionCommand),
     /// Print build version.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RetentionCommand {
+    /// Report what the next sweep pass would drop, without modifying
+    /// anything. Honours the [[retention]] policies in the loaded config.
+    DryRun {
+        #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
+        config: PathBuf,
+    },
 }
 
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -53,5 +68,63 @@ pub fn dispatch(cli: Cli) -> Result<()> {
                 .build()?;
             rt.block_on(server::run(cfg))
         }
+        Command::Retention(RetentionCommand::DryRun { config: path }) => retention_dry_run(&path),
     }
+}
+
+fn retention_dry_run(path: &std::path::Path) -> Result<()> {
+    let cfg = config::load(path)?;
+    let data_dir = cfg
+        .server
+        .as_ref()
+        .map(|s| s.data_dir.clone())
+        .context("no [server].data_dir — nothing to sweep")?;
+
+    let cold =
+        Arc::new(ColdStore::open(std::path::Path::new(&data_dir)).context("opening cold store")?);
+    let vector = match build_vector_index_handle(&cfg, &data_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            // Vector index is optional; warn and continue with cold only.
+            eprintln!("note: vector index not available: {e}");
+            None
+        }
+    };
+    let policies = config::build_retention_policies(&cfg)?;
+    let now_ms = percept_core::now_ms_utc();
+    let report =
+        sweep(&cold, vector.as_deref(), &policies, now_ms, true).context("retention dry-run")?;
+    let pretty = serde_json::to_string_pretty(&report).unwrap_or_default();
+    println!("{pretty}");
+    Ok(())
+}
+
+/// Open the vector index using the same model id the running embedder
+/// would use. Returns `None` (with the error logged) when the index
+/// can't be loaded — e.g. wrong-model mismatch from a prior session.
+fn build_vector_index_handle(
+    cfg: &config::Config,
+    data_dir: &str,
+) -> Result<Option<Arc<VectorIndex>>> {
+    use percept_store::HashEmbedder;
+    let embed_default = cfg
+        .storage
+        .as_ref()
+        .and_then(|s| s.embed_default)
+        .unwrap_or(false);
+    let any_enabled = embed_default
+        || cfg.kinds.iter().any(|k| k.embed == Some(true))
+        || cfg.sources.iter().any(|s| s.embed == Some(true));
+    if !any_enabled {
+        return Ok(None);
+    }
+    // Match `server::current_embedder`. When the slice-4 follow-up
+    // wires the real embedder this becomes a shared helper.
+    let embedder = HashEmbedder::new(64);
+    let idx = VectorIndex::open(
+        std::path::Path::new(data_dir),
+        percept_store::Embedder::model_id(&embedder),
+        percept_store::Embedder::dim(&embedder),
+    )?;
+    Ok(Some(Arc::new(idx)))
 }
