@@ -5,9 +5,15 @@
 
 pub mod cold;
 mod hot_ring;
+pub mod vector;
 
 pub use cold::{
     filter_hash, Anchor, ColdError, ColdStore, ColdWriter, ColdWriterConfig, ColdWriterMetrics,
     Cursor, CursorError, WindowFilter, MAX_WINDOW_LIMIT,
 };
 pub use hot_ring::{HotRingConfig, HotRings, Snapshot};
+pub use vector::{
+    cosine_similarity, truncate_utf8, EmbedSelector, Embedder, EmbedderConfig, EmbedderMetrics,
+    EmbedderTask, HashEmbedder, SearchHit, SharedEmbedder, VectorError, VectorFilter, VectorIndex,
+    VectorRecord, EMBED_TRUNCATE_BYTES,
+};

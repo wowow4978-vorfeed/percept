@@ -471,8 +471,14 @@ freshness_ttl_ms = 60000
   `rusqlite` — DuckDB-bundled was untenable for CI disk budget and
   compile time; SQLite meets the slice-3 acceptance target. Switch
   remains a v2 perf concern, see `PLAN.md` slice 3.)
-- **Vector index:** LanceDB
-- **Embeddings:** FastEmbed-rs (local, swappable)
+- **Vector index:** LanceDB (v1 ships with a SQLite-backed table +
+  in-memory float32 brute-force cosine — fast enough for the edge
+  profile up to ~100 k vectors; ANN engine is a v2 perf concern, see
+  `PLAN.md` slice 4.)
+- **Embeddings:** FastEmbed-rs (local, swappable) — v1 ships a
+  deterministic `HashEmbedder` placeholder because the ONNX model fetch
+  needs network access we don't have in CI/sandbox; the `Embedder` trait
+  is the swap point. See `PLAN.md` slice 4 "Engine deviation".
 - **MCP server:** `rmcp`
 - **Result:** one ~15 MB static binary, **edge profile only**. The "single binary" claim applies to v1; a v2 server profile would add an external TSDB dependency.
 

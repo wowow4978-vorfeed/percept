@@ -196,6 +196,22 @@ impl ColdStore {
         Ok(row)
     }
 
+    /// Fetch a single event by `event_id`. Used by `search_events` to
+    /// resolve vector hits back to their full canonical Events.
+    pub fn get_by_id(&self, event_id: &Ulid) -> Result<Option<Event>, ColdError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT event_id, source_id, kind, ts_ms_utc, ingest_ts_ms_utc,
+                    seq, producer_id, trace_id, semantic, links, schema_invalid
+               FROM events
+              WHERE event_id = ?",
+        )?;
+        let row = stmt
+            .query_row(params![event_id.to_string()], row_to_event)
+            .optional()?;
+        Ok(row)
+    }
+
     /// Time-range scan with cursor-based pagination.
     ///
     /// Resumption is `(ts_ms_utc, event_id) > anchor` in the stable
