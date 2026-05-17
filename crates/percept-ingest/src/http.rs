@@ -48,6 +48,11 @@ pub fn router(state: HttpState) -> Router {
         .route("/ingest/ws", get(crate::ws::ws_handler))
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics))
+        // Transparently decompress `Content-Encoding: gzip` request
+        // bodies before the handlers see them. The producer SDK
+        // (percept-client) defaults to gzip on the wire to save
+        // bandwidth on chatty batches.
+        .layer(tower_http::decompression::RequestDecompressionLayer::new().gzip(true))
         .with_state(state)
 }
 
