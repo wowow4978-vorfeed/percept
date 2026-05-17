@@ -13,6 +13,7 @@ version = "0.1.0"
 percept-core = { path = "crates/percept-core" }
 percept-store = { path = "crates/percept-store" }
 percept-ingest = { path = "crates/percept-ingest" }
+percept-client = { path = "crates/percept-client" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,7 +30,7 @@ glob = "0.3"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "decompression-gzip"] }
 bytes = "1"
 parking_lot = "0.12"
 globset = "0.4"
@@ -42,6 +43,7 @@ rumqttc = "0.24"
 # but 0.6.x has an internal crate-split version mismatch with its macros
 # crate that the resolver can't untangle.
 jsonpath-rust = "0.7"
+flate2 = "1"
 
 # Cold store (slice 3)
 #

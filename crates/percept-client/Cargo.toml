@@ -1,0 +1,34 @@
+[package]
+name = "percept-client"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Pull in reqwest's blocking client + a thin sync wrapper. Off by default
+# so an async-only consumer doesn't pay the cost.
+blocking = ["reqwest/blocking"]
+
+[dependencies]
+percept-core = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+ulid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "gzip"] }
+flate2 = "1"
+
+[dev-dependencies]
+percept-ingest = { workspace = true }
+percept-store = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }

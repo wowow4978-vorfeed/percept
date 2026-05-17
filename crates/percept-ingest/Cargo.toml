@@ -22,6 +22,7 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
+tower-http = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 globset = { workspace = true }

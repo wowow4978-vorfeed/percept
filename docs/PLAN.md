@@ -297,20 +297,32 @@ list ships here.
 **Goal:** thin client library so producers don't reimplement batching.
 
 **In scope:**
-- New crate `percept-client`: batched send, retry honouring `Retry-After`,
-  bearer token, gzip when accepted.
-- Logs `X-Percept-Shed-Reason` on shed.
-- Optional sync variant for embedded producers.
+- New crate `percept-client`: async `Client::send_batch` with retry on
+  `429`/`503` honouring `Retry-After`, bearer-token auth, gzip on the
+  wire (default). Maps `X-Percept-Shed-Reason: unauthorized` /
+  `payload_too_large` to `ClientError::ScopeDeny` / `PayloadTooLarge`
+  immediately rather than burning retries on a permanent error.
+- `Batcher` wrapper with background flush task (size + time triggers)
+  for the chatty-producer case.
+- `BlockingClient` for embedded producers without a tokio runtime,
+  gated behind the `blocking` cargo feature so async-only consumers
+  don't pay the cost.
+- Server-side: `tower-http::decompression` layer added to the ingest
+  router so gzipped request bodies transparently decompress before
+  hitting the handler.
 
 **Out of scope:**
 - Non-Rust SDKs (community / later).
 - Forwarder behaviour (Slice 8 builds on this).
 
 **Acceptance:**
-- Round-trip test: SDK → HTTP ingest → hot ring → MCP query.
-- 429 + `Retry-After` honoured under simulated rate-limit.
+- Round-trip test: SDK → HTTP ingest → hot ring (verified via the
+  in-process server harness with `Pipeline`).
+- `429 + Retry-After` honoured under simulated rate-limit (test
+  configures a `1/s` scope, fires two requests, asserts the second
+  succeeds only after a backoff sleep).
 
-**Status:** ☐
+**Status:** ☑ (this PR).
 
 ---
 
