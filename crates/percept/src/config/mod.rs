@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use percept_core::{resolve, KindDescriptor, ResolvedDescriptor, SourceDescriptor};
 
-pub use schema::{Config, KindEntry, RetentionEntry, SourceEntry};
+pub use schema::{Config, HttpToken, KindEntry, RetentionEntry, SourceEntry};
 
 /// Load configuration from `path`, then merge any `<path>.d/*.toml` files
 /// (later filenames win for scalar fields; array-of-tables entries

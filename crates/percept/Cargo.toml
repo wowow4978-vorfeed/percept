@@ -26,6 +26,10 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 glob = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }

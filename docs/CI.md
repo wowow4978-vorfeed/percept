@@ -5,9 +5,14 @@
 ## Decisions
 
 ### 1. Rust toolchain — pinned stable
-Pinned to **stable 1.84** via `rust-toolchain.toml` (rustfmt + clippy +
+Pinned to **stable 1.85** via `rust-toolchain.toml` (rustfmt + clippy +
 aarch64 target). Bumped explicitly via PR when a feature or fix requires it.
 Rationale: predictable builds; clippy lints don't shift under us between PRs.
+
+History:
+- 1.84 → 1.85 (slice 1): edition 2024 stabilized in 1.85 and several
+  transitive deps (globset, hashbrown, etc.) gate their manifests on the
+  `edition2024` cargo feature, which the 1.84 resolver can't parse.
 
 ### 2. Container image — yes, multi-arch on release
 Built and pushed on every `v*` tag. Target registry:

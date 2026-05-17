@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.84"
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/wowow4978-vorfeed/percept"
 version = "0.1.0"
@@ -24,6 +24,20 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 glob = "0.3"
+
+# Async / HTTP / pipeline (Slice 1)
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+bytes = "1"
+parking_lot = "0.12"
+globset = "0.4"
+governor = "0.6"
+
+# Test-only
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
