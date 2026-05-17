@@ -467,7 +467,10 @@ freshness_ttl_ms = 60000
 - **Runtime:** Rust + tokio
 - **MQTT:** `rumqttc`
 - **HTTP ingest + MCP transport:** `axum`, Streamable HTTP (SSE fallback)
-- **Cold store:** DuckDB + Parquet
+- **Cold store:** DuckDB + Parquet (v1 ships with bundled SQLite via
+  `rusqlite` — DuckDB-bundled was untenable for CI disk budget and
+  compile time; SQLite meets the slice-3 acceptance target. Switch
+  remains a v2 perf concern, see `PLAN.md` slice 3.)
 - **Vector index:** LanceDB
 - **Embeddings:** FastEmbed-rs (local, swappable)
 - **MCP server:** `rmcp`

@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use percept_ingest::Metrics;
-use percept_store::HotRings;
+use percept_store::{ColdStore, HotRings};
 use serde_json::json;
 
 use super::protocol::{
@@ -25,6 +25,7 @@ pub struct McpState {
     pub token: Arc<String>,
     pub registry: Arc<DescriptorRegistry>,
     pub hot_rings: Arc<HotRings>,
+    pub cold_store: Option<Arc<ColdStore>>,
     pub metrics: Arc<Metrics>,
 }
 
@@ -92,8 +93,18 @@ fn dispatch(s: &McpState, req: &Request) -> RpcResponse {
                         name: "get_current_state",
                         description: "Latest event per (source, kind) from the hot \
                              ring. Each entry carries age_ms and a stale flag \
-                             derived from the descriptor's freshness_ttl_ms.",
+                             derived from the descriptor's freshness_ttl_ms. \
+                             Falls back to the cold store on a hot-ring miss; \
+                             those rows are tagged from_cold = true.",
                         input_schema: tools::get_current_state_input_schema(),
+                    },
+                    Tool {
+                        name: "get_window",
+                        description: "Time-range scan from the cold store. \
+                             Paginated via an opaque cursor. Ordered by \
+                             (ts_ms_utc, event_id) ascending. Per-call hard \
+                             limit 10,000 events.",
+                        input_schema: tools::get_window_input_schema(),
                     },
                 ],
             })
@@ -144,7 +155,25 @@ fn dispatch_call(
                 Ok(a) => a,
                 Err(e) => return RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
             };
-            match tools::get_current_state(&s.registry, &s.hot_rings, parsed) {
+            match tools::get_current_state(
+                &s.registry,
+                &s.hot_rings,
+                s.cold_store.as_deref(),
+                parsed,
+            ) {
+                Ok(v) => RpcResponse::ok(
+                    id,
+                    serde_json::to_value(CallResult::structured(v)).expect("serializable"),
+                ),
+                Err(e) => RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
+            }
+        }
+        "get_window" => {
+            let parsed = match serde_json::from_value(args) {
+                Ok(a) => a,
+                Err(e) => return RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
+            };
+            match tools::get_window(s.cold_store.as_deref(), parsed) {
                 Ok(v) => RpcResponse::ok(
                     id,
                     serde_json::to_value(CallResult::structured(v)).expect("serializable"),

@@ -125,7 +125,15 @@ when sampling / SSE-streamed responses become needed.
 **Goal:** durability and "what happened in [time range]".
 
 **In scope:**
-- DuckDB + Parquet, partitioned by day and `source_id`.
+- ~~DuckDB + Parquet, partitioned by day and `source_id`~~ — v1 ships
+  with rusqlite (bundled SQLite) instead. DuckDB-bundled produces ~4 GB
+  per build directory and a 9-minute first compile, which CI runners
+  can't sustain. SQLite + the same SQL surface (cursor-friendly
+  indexes on `(ts_ms_utc, event_id)` and `(source_id, kind, ts_ms_utc)`)
+  meets the slice-3 acceptance target. DuckDB stays as a v2 perf
+  concern when Parquet portability and >10 M-event scans become real
+  requirements. `day` column is in place for the partition-drop work in
+  slice 5; Parquet export joins it.
 - Cold writer consumer: batches by time + size; lag observable.
 - `latest` table maintained at each batch commit (DECISIONS §4).
 - `get_current_state` cold fallback on hot-ring miss; results tagged
@@ -144,7 +152,8 @@ when sampling / SSE-streamed responses become needed.
   `cursor_filter_mismatch`.
 - Cold writer lag exposed on `/metrics`.
 
-**Status:** ☐
+**Status:** ☑ (this PR). DuckDB → rusqlite deviation noted above and in
+DESIGN Appendix A.
 
 ---
 

@@ -35,6 +35,7 @@ pub const DEFAULT_SOFT_CAP_BYTES: usize = 16 * 1024;
 pub struct HttpState {
     pub auth: Arc<Auth>,
     pub metrics: Arc<Metrics>,
+    pub cold_writer_metrics: Option<Arc<percept_store::ColdWriterMetrics>>,
     pub tx: mpsc::Sender<IngestEnvelope>,
     pub hard_cap_bytes: usize,
     pub soft_cap_bytes: usize,
@@ -53,7 +54,11 @@ async fn healthz() -> &'static str {
 }
 
 async fn metrics(State(s): State<HttpState>) -> String {
-    s.metrics.render()
+    let mut out = s.metrics.render();
+    if let Some(cm) = &s.cold_writer_metrics {
+        cm.render_into(&mut out);
+    }
+    out
 }
 
 #[derive(Serialize)]

@@ -30,6 +30,7 @@ pub struct Normalizer {
     hot_rings: Arc<HotRings>,
     metrics: Arc<Metrics>,
     schemas: Arc<SchemaIndex>,
+    cold_tx: Option<mpsc::Sender<Arc<Event>>>,
     seq_by_source: HashMap<String, u64>,
 }
 
@@ -40,12 +41,14 @@ impl Normalizer {
         hot_rings: Arc<HotRings>,
         metrics: Arc<Metrics>,
         schemas: Arc<SchemaIndex>,
+        cold_tx: Option<mpsc::Sender<Arc<Event>>>,
     ) -> Self {
         Self {
             rx,
             hot_rings,
             metrics,
             schemas,
+            cold_tx,
             seq_by_source: HashMap::new(),
         }
     }
@@ -53,8 +56,19 @@ impl Normalizer {
     pub async fn run(mut self) {
         tracing::debug!("normalizer started");
         while let Some(envelope) = self.rx.recv().await {
-            let event = self.normalize(envelope.event);
-            self.hot_rings.push(Arc::new(event));
+            let event = Arc::new(self.normalize(envelope.event));
+            self.hot_rings.push(event.clone());
+            if let Some(tx) = &self.cold_tx {
+                match tx.try_send(event) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        self.metrics.inc_consumer_drop("cold_writer");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Cold writer task exited; treat as no cold sink.
+                    }
+                }
+            }
             self.metrics.inc_accepted(envelope.token_name.as_deref());
         }
         tracing::info!("normalizer: input closed, exiting");
