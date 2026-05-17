@@ -31,6 +31,12 @@ pub struct Config {
     #[serde(default, rename = "ros2")]
     pub ros2: Vec<Ros2Bridge>,
 
+    #[serde(default, rename = "forwarder")]
+    pub forwarders: Vec<ForwarderEntry>,
+
+    #[serde(default, rename = "peer")]
+    pub peers: Vec<PeerEntry>,
+
     #[serde(default, rename = "source")]
     pub sources: Vec<SourceEntry>,
 
@@ -56,9 +62,52 @@ impl Config {
         self.ble.extend(overlay.ble);
         self.http_tokens.extend(overlay.http_tokens);
         self.ros2.extend(overlay.ros2);
+        self.forwarders.extend(overlay.forwarders);
+        self.peers.extend(overlay.peers);
         self.sources.extend(overlay.sources);
         self.kinds.extend(overlay.kinds);
     }
+}
+
+/// `[[forwarder]]` — push events from this edge to a hub. DESIGN §8.
+/// Source IDs are mandatorily prefixed with `peer_id` on egress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForwarderEntry {
+    /// Prefix the forwarder prepends to every source_id on egress.
+    pub peer_id: String,
+    /// Base URL of the hub Percept (e.g. `http://hub.lan:7878`).
+    pub hub_url: String,
+    /// Bearer token the hub accepts (via env var ref).
+    #[serde(default)]
+    pub hub_token_env: Option<String>,
+    #[serde(default)]
+    pub hub_token_file: Option<String>,
+    /// Populated by `secrets::resolve` after the env/file lookup.
+    #[serde(skip)]
+    pub resolved_hub_token: Option<String>,
+}
+
+/// `[[peer]]` — a remote Percept queried as part of federation.
+/// DESIGN §8: `describe_sources` and `get_current_state` fan out to
+/// these alongside the local query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerEntry {
+    /// Logical name attached to results aggregated from this peer.
+    pub id: String,
+    /// Full URL of the peer's MCP endpoint (e.g.
+    /// `http://kitchen.lan:7878/mcp`).
+    pub mcp_url: String,
+    #[serde(default)]
+    pub token_env: Option<String>,
+    #[serde(default)]
+    pub token_file: Option<String>,
+    /// Per-peer timeout for the fan-out call; default is 1s when unset.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(skip)]
+    pub resolved_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

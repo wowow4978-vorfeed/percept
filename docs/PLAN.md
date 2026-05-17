@@ -331,21 +331,37 @@ list ships here.
 
 **In scope:**
 - Forwarder: edge → hub via `percept-client` with mandatory `<peer_id>.`
-  source_id prefix on egress; descriptors prefixed too.
-- Local hot rings answer "now" when WAN is down.
-- Federation: `describe_sources()` aggregates across peers; queries fan out
-  with per-peer timeout; per-peer status (`ok` / `timeout` / `error`) in
-  responses.
+  source_id prefix on egress. Hooks into the normalizer's fan-out as a
+  fourth optional sink (alongside cold writer + embedder); when the
+  hub is down, `try_send` drops with a `consumer_drops{consumer="forwarder"}`
+  increment so local ingest never blocks.
+- Local hot rings answer "now" when WAN is down (covered by the same
+  fan-out architecture — the forwarder is decoupled from the hot ring
+  write path).
+- Federation: `describe_sources()` and `get_current_state()` aggregate
+  across peers. Each peer query runs concurrently with its own
+  `timeout_ms`; `peer_status` is reported per-peer (`ok` / `timeout` /
+  `error{message}`). Every row in `sources` / `states` carries a
+  `peer_id` (`null` for local) so the LLM can attribute results.
 
 **Out of scope:**
 - Cross-peer write coordination (explicit non-goal, DESIGN §8).
+- Federation of `get_window` / `search_events` — cursor + ANN
+  pagination across peers is meaningfully harder and is a slice-8
+  follow-up.
 
 **Acceptance:**
 - Two-edge demo: edges A and B both have `temp.fridge`; hub sees
-  `A.temp.fridge` and `B.temp.fridge`; no collision.
-- WAN-down test: edge's local `get_current_state` still works.
+  `A.temp.fridge` and `B.temp.fridge`; unprefixed `temp.fridge` is
+  absent from the hub.
+- WAN-down test: edge's local `get_current_state` still works while
+  the forwarder's `send_errors` counter ticks.
+- Federation: `describe_sources` / `get_current_state` aggregate
+  across peers with `peer_status: ok`; an unreachable peer reports
+  `timeout` / `error` without taking down the local result.
 
-**Status:** ☐
+**Status:** ☑ (this PR). `get_window` / `search_events` federation is
+a slice-8 follow-up.
 
 ---
 

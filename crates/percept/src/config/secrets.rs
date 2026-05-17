@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-use super::schema::{Config, HttpToken, MqttCredentials, SecretRef};
+use super::schema::{Config, ForwarderEntry, HttpToken, MqttCredentials, PeerEntry, SecretRef};
 
 pub fn resolve(cfg: &mut Config) -> Result<()> {
     if let Some(mcp) = &mut cfg.mcp {
@@ -21,6 +21,26 @@ pub fn resolve(cfg: &mut Config) -> Result<()> {
     for token in &mut cfg.http_tokens {
         resolve_http_token(token)?;
     }
+    for fw in &mut cfg.forwarders {
+        resolve_forwarder_token(fw)?;
+    }
+    for peer in &mut cfg.peers {
+        resolve_peer_token(peer)?;
+    }
+    Ok(())
+}
+
+fn resolve_forwarder_token(fw: &mut ForwarderEntry) -> Result<()> {
+    let site = format!("[forwarder \"{}\"] hub_token", fw.peer_id);
+    let value = read_one_of(&fw.hub_token_env, &fw.hub_token_file, &site, "hub_token")?;
+    fw.resolved_hub_token = Some(value);
+    Ok(())
+}
+
+fn resolve_peer_token(p: &mut PeerEntry) -> Result<()> {
+    let site = format!("[peer \"{}\"] token", p.id);
+    let value = read_one_of(&p.token_env, &p.token_file, &site, "token")?;
+    p.resolved_token = Some(value);
     Ok(())
 }
 

@@ -40,6 +40,9 @@ pub struct Normalizer {
     schemas: Arc<SchemaIndex>,
     cold_tx: Option<mpsc::Sender<Arc<Event>>>,
     embed_sink: Option<EmbedSink>,
+    /// Forwarder fan-out (slice 8). The forwarder task in the binary
+    /// crate drains this and pushes to the hub via percept-client.
+    forward_tx: Option<mpsc::Sender<Arc<Event>>>,
     seq_by_source: HashMap<String, u64>,
 }
 
@@ -52,6 +55,7 @@ impl Normalizer {
         schemas: Arc<SchemaIndex>,
         cold_tx: Option<mpsc::Sender<Arc<Event>>>,
         embed_sink: Option<EmbedSink>,
+        forward_tx: Option<mpsc::Sender<Arc<Event>>>,
     ) -> Self {
         Self {
             rx,
@@ -60,6 +64,7 @@ impl Normalizer {
             schemas,
             cold_tx,
             embed_sink,
+            forward_tx,
             seq_by_source: HashMap::new(),
         }
     }
@@ -82,7 +87,7 @@ impl Normalizer {
             }
             if let Some(sink) = &self.embed_sink {
                 if sink.selector.should_embed(&event.source_id, &event.kind) {
-                    match sink.tx.try_send(event) {
+                    match sink.tx.try_send(event.clone()) {
                         Ok(()) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             self.metrics.inc_consumer_drop("embedder");
@@ -90,6 +95,17 @@ impl Normalizer {
                         Err(mpsc::error::TrySendError::Closed(_)) => {
                             // Embedder task exited; treat as no embed sink.
                         }
+                    }
+                }
+            }
+            if let Some(tx) = &self.forward_tx {
+                match tx.try_send(event) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        self.metrics.inc_consumer_drop("forwarder");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Forwarder task exited; treat as no forward sink.
                     }
                 }
             }

@@ -13,7 +13,9 @@ use anyhow::{anyhow, Context, Result};
 use percept_core::{resolve, KindDescriptor, ResolvedDescriptor, SourceDescriptor};
 use percept_store::RetentionPolicy;
 
-pub use schema::{Config, HttpToken, KindEntry, RetentionEntry, SourceEntry};
+pub use schema::{
+    Config, ForwarderEntry, HttpToken, KindEntry, PeerEntry, RetentionEntry, SourceEntry,
+};
 
 /// Load configuration from `path`, then merge any `<path>.d/*.toml` files
 /// (later filenames win for scalar fields; array-of-tables entries

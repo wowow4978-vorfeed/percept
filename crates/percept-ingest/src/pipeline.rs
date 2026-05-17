@@ -62,6 +62,10 @@ pub struct Pipeline {
     pub cold_writer_metrics: Option<Arc<ColdWriterMetrics>>,
     pub vector_index: Option<Arc<VectorIndex>>,
     pub embedder_metrics: Option<Arc<EmbedderMetrics>>,
+    /// Slice 8: receiver end of the forwarder fan-out. `None` when no
+    /// `[[forwarder]]` is configured; the binary drains this and posts
+    /// to a hub via percept-client.
+    pub forward_rx: Option<mpsc::Receiver<Arc<Event>>>,
     pub normalizer_handle: JoinHandle<()>,
     pub cold_writer_handle: Option<JoinHandle<()>>,
     pub embedder_handle: Option<JoinHandle<()>>,
@@ -73,6 +77,7 @@ impl Pipeline {
         schemas: Arc<SchemaIndex>,
         cold_store: Option<Arc<ColdStore>>,
         vector: Option<VectorSubsystem>,
+        forwarder_enabled: bool,
         config: PipelineConfig,
     ) -> Self {
         let metrics = Arc::new(Metrics::new());
@@ -114,6 +119,13 @@ impl Pipeline {
             (None, None, None, None)
         };
 
+        let (forward_tx, forward_rx) = if forwarder_enabled {
+            let (t, r) = mpsc::channel::<Arc<Event>>(config.bus_depth);
+            (Some(t), Some(r))
+        } else {
+            (None, None)
+        };
+
         let normalizer = Normalizer::new(
             rx,
             hot_rings.clone(),
@@ -121,6 +133,7 @@ impl Pipeline {
             schemas,
             cold_tx,
             embed_sink,
+            forward_tx,
         );
         let normalizer_handle = tokio::spawn(normalizer.run());
 
@@ -142,6 +155,7 @@ impl Pipeline {
             cold_writer_metrics: cold_metrics,
             vector_index,
             embedder_metrics,
+            forward_rx,
             normalizer_handle,
             cold_writer_handle: cold_handle,
             embedder_handle,

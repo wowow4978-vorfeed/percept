@@ -28,6 +28,7 @@ async fn spawn(scope: TokenScope) -> Harness {
         Arc::new(SchemaIndex::default()),
         None,
         None,
+        false,
         PipelineConfig::default(),
     );
     let app = router(pipeline.http_state.clone());
