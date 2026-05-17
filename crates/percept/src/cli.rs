@@ -31,8 +31,22 @@ pub enum Command {
     /// Retention administration.
     #[command(subcommand)]
     Retention(RetentionCommand),
+    /// BLE administration. v1 ships only the `pair` helper — actual scan
+    /// and GATT adapters land in a slice-6 follow-up.
+    #[command(subcommand)]
+    Ble(BleCommand),
     /// Print build version.
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BleCommand {
+    /// Thin wrapper over `bluetoothctl pair <mac>`. DESIGN §12.5:
+    /// pairing is OS-managed, percept stores nothing.
+    Pair {
+        /// MAC address of the device to pair with, e.g. AA:BB:CC:DD:EE:FF.
+        mac: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -69,7 +83,36 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             rt.block_on(server::run(cfg))
         }
         Command::Retention(RetentionCommand::DryRun { config: path }) => retention_dry_run(&path),
+        Command::Ble(BleCommand::Pair { mac }) => ble_pair(&mac),
     }
+}
+
+fn ble_pair(mac: &str) -> Result<()> {
+    if !looks_like_mac(mac) {
+        anyhow::bail!(
+            "{:?} does not look like a MAC address (expected AA:BB:CC:DD:EE:FF)",
+            mac
+        );
+    }
+    let status = std::process::Command::new("bluetoothctl")
+        .arg("pair")
+        .arg(mac)
+        .status()
+        .with_context(|| {
+            "running bluetoothctl — install BlueZ (`apt install bluez` on Debian) or run on a host with it available"
+        })?;
+    if !status.success() {
+        anyhow::bail!("bluetoothctl pair exited with {status}");
+    }
+    Ok(())
+}
+
+fn looks_like_mac(s: &str) -> bool {
+    let bytes: Vec<&str> = s.split(':').collect();
+    bytes.len() == 6
+        && bytes
+            .iter()
+            .all(|b| b.len() == 2 && b.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn retention_dry_run(path: &std::path::Path) -> Result<()> {
@@ -127,4 +170,23 @@ fn build_vector_index_handle(
         percept_store::Embedder::dim(&embedder),
     )?;
     Ok(Some(Arc::new(idx)))
+}
+
+#[cfg(test)]
+mod mac_tests {
+    use super::looks_like_mac;
+
+    #[test]
+    fn accepts_canonical() {
+        assert!(looks_like_mac("AA:BB:CC:DD:EE:FF"));
+        assert!(looks_like_mac("aa:bb:cc:dd:ee:ff"));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(!looks_like_mac("hello"));
+        assert!(!looks_like_mac("AA:BB:CC:DD:EE")); // 5 segments
+        assert!(!looks_like_mac("AA-BB-CC-DD-EE-FF"));
+        assert!(!looks_like_mac("ZZ:BB:CC:DD:EE:FF"));
+    }
 }

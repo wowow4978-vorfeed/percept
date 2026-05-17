@@ -45,6 +45,7 @@ pub struct HttpState {
 pub fn router(state: HttpState) -> Router {
     Router::new()
         .route("/ingest", post(ingest))
+        .route("/ingest/ws", get(crate::ws::ws_handler))
         .route("/healthz", get(healthz))
         .route("/metrics", get(metrics))
         .with_state(state)

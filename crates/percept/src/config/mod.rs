@@ -1,7 +1,7 @@
 //! Configuration loader: TOML, `conf.d/*.toml` merge, secret resolution,
 //! and the validation rules called out in `docs/PLAN.md` Slice 0.
 
-mod schema;
+pub mod schema;
 mod secrets;
 mod validate;
 

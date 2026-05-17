@@ -27,7 +27,7 @@ glob = "0.3"
 
 # Async / HTTP / pipeline (Slice 1)
 tokio = { version = "1", features = ["full"] }
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 bytes = "1"
@@ -35,6 +35,13 @@ parking_lot = "0.12"
 globset = "0.4"
 governor = "0.6"
 jsonschema = { version = "0.17", default-features = false }
+
+# Adapters (slice 6)
+rumqttc = "0.24"
+# jsonpath-rust is RFC 9535-compliant. We previously tried serde_json_path
+# but 0.6.x has an internal crate-split version mismatch with its macros
+# crate that the resolver can't untangle.
+jsonpath-rust = "0.7"
 
 # Cold store (slice 3)
 #
