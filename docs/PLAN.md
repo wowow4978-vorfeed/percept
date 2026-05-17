@@ -209,25 +209,37 @@ slice-4 follow-up per "Engine deviation".
 **Goal:** disk doesn't grow forever; policy is auditable.
 
 **In scope:**
-- Background sweeper (default 1 h cadence).
-- `max_age` via whole day-partition drops.
+- Background sweeper (default 1 h cadence; configurable via
+  `[storage] sweeper_interval`).
+- `max_age` as a `(source_id, kind, ts_ms_utc)` DELETE against the cold
+  store — uses the `events_by_source_kind` index slice 3 already
+  established. (Whole-Parquet-file unlinks are a v2 follow-up alongside
+  Parquet export, see DESIGN Appendix A.)
 - `max_count` / `max_bytes` via in-partition rewrite; warning logged when
-  bound to a high-rate source.
-- Source > kind > global resolution order.
-- Vector index pruning coupled to raw retention.
-- `describe_sources()` surfaces effective policy per source.
-- `percept retention dry-run` CLI.
+  bound to a `(source, kind)` exceeding `EXPENSIVE_REWRITE_THRESHOLD`
+  events.
+- Source > kind > global resolution order (first-match-wins per
+  dimension).
+- Vector pruning by `vector_max_age`. (Cross-DB orphan reconciliation —
+  vectors whose `event_id` was just dropped from the cold store — is a
+  slice-6 follow-up; until then, `vector_max_age` is the operator's
+  knob for keeping the vector index bounded.)
+- `describe_sources()` surfaces `effective_retention` per source.
+- `percept retention dry-run --config <path>` CLI prints a JSON
+  `SweepReport` of what the next sweep would drop.
 
 **Out of scope:**
 - Blob GC (producer's problem, DESIGN §11.3).
 - Event-level "pinned" flag (explicit non-goal).
 
 **Acceptance:**
-- Sweeper drops a day-partition without rewriting; dry-run accurately
-  predicts the drop.
+- Sweeper drops events older than `max_age` cheaply (single indexed
+  DELETE); dry-run accurately predicts the drop without modifying state.
 - Per-source effective policy reflected in `describe_sources()`.
 
-**Status:** ☐
+**Status:** ☑ (this PR). Cross-DB orphan reconciliation between vectors
+and the cold store is the one slice-5 follow-up; the rest of the in-scope
+list ships here.
 
 ---
 

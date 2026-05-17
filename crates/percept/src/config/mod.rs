@@ -7,8 +7,11 @@ mod validate;
 
 use std::path::{Path, PathBuf};
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Context, Result};
 use percept_core::{resolve, KindDescriptor, ResolvedDescriptor, SourceDescriptor};
+use percept_store::RetentionPolicy;
 
 pub use schema::{Config, HttpToken, KindEntry, RetentionEntry, SourceEntry};
 
@@ -82,6 +85,60 @@ pub fn build_source_descriptors(cfg: &Config) -> Vec<SourceDescriptor> {
 #[must_use]
 pub fn build_kind_descriptors(cfg: &Config) -> Vec<KindDescriptor> {
     cfg.kinds.iter().map(kind_descriptor).collect()
+}
+
+/// Translate `[[retention]]` entries into the storage-layer policy type.
+/// Durations are parsed by the slice-0 validator at config-load; an
+/// unparseable duration here is an internal bug (validate would have
+/// errored already).
+pub fn build_retention_policies(cfg: &Config) -> Result<Vec<RetentionPolicy>> {
+    let mut out = Vec::new();
+    for r in &cfg.retention {
+        let max_age = match &r.max_age {
+            Some(s) => Some(parse_duration_str(s).with_context(|| format!("max_age = {s:?}"))?),
+            None => None,
+        };
+        let vector_max_age = match &r.vector_max_age {
+            Some(s) => {
+                Some(parse_duration_str(s).with_context(|| format!("vector_max_age = {s:?}"))?)
+            }
+            None => None,
+        };
+        out.push(RetentionPolicy {
+            match_source_id: r.r#match.source_id.clone(),
+            match_kind: r.r#match.kind.clone(),
+            max_age,
+            max_count: r.max_count,
+            max_bytes: r.max_bytes,
+            vector_max_age,
+        });
+    }
+    Ok(out)
+}
+
+/// Same duration grammar as `validate::parse_duration` — kept private
+/// to that module, mirrored here so descriptor-building doesn't drag in
+/// the validate internals.
+fn parse_duration_str(s: &str) -> Result<Duration> {
+    let s = s.trim();
+    let (num_str, unit) = s
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| s.split_at(i))
+        .ok_or_else(|| anyhow!("missing unit suffix in {s:?}"))?;
+    if num_str.is_empty() {
+        return Err(anyhow!("missing numeric value in {s:?}"));
+    }
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| anyhow!("invalid number in {s:?}"))?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n.checked_mul(60).ok_or_else(|| anyhow!("overflow"))?,
+        "h" => n.checked_mul(3600).ok_or_else(|| anyhow!("overflow"))?,
+        "d" => n.checked_mul(86_400).ok_or_else(|| anyhow!("overflow"))?,
+        other => return Err(anyhow!("unknown unit {other:?} (expected s/m/h/d)")),
+    };
+    Ok(Duration::from_secs(secs))
 }
 
 fn source_descriptor(s: &SourceEntry) -> SourceDescriptor {

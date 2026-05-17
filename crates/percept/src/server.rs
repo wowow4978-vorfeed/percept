@@ -11,6 +11,7 @@ use percept_store::{ColdStore, EmbedSelector, Embedder, HashEmbedder, VectorInde
 
 use crate::config::{self, Config, HttpToken};
 use crate::mcp::{DescriptorRegistry, McpState};
+use crate::sweeper::{Sweeper, SweeperConfig};
 
 /// Build the ingest + MCP pipeline from a loaded config, bind the configured
 /// listener, and serve until SIGINT.
@@ -67,6 +68,27 @@ pub async fn run(cfg: Config) -> Result<()> {
         PipelineConfig::default(),
     );
 
+    // Retention policies + sweeper. Wires only if there's a cold store
+    // (without one, there's nothing to sweep).
+    let retention_policies =
+        Arc::new(config::build_retention_policies(&cfg).context("parsing [[retention]]")?);
+    if let Some(cold) = &cold_store {
+        let sweeper = Sweeper::new(
+            cold.clone(),
+            vector_index.clone(),
+            retention_policies.clone(),
+            SweeperConfig {
+                cadence: cfg
+                    .storage
+                    .as_ref()
+                    .and_then(|s| s.sweeper_interval.as_deref())
+                    .and_then(parse_cadence_or_warn)
+                    .unwrap_or_else(|| std::time::Duration::from_secs(3600)),
+            },
+        );
+        tokio::spawn(sweeper.run());
+    }
+
     let mcp_state = McpState {
         token: Arc::new(mcp_token),
         registry: Arc::new(registry),
@@ -74,6 +96,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         cold_store,
         vector_index,
         embedder: pipeline.vector_index.as_ref().map(|_| current_embedder()),
+        retention_policies,
         metrics: pipeline.metrics.clone(),
     };
 
@@ -119,6 +142,30 @@ fn build_auth(tokens: &[HttpToken]) -> Result<Auth> {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutdown signal received");
+}
+
+/// Best-effort cadence parse for `[storage] sweeper_interval = "1h"`. A
+/// bad value falls back to the default with a warning rather than
+/// failing startup, since the field is operational.
+fn parse_cadence_or_warn(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    let (num_str, unit) = s
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| s.split_at(i))?;
+    let n: u64 = num_str.parse().ok()?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n.checked_mul(60)?,
+        "h" => n.checked_mul(3600)?,
+        "d" => n.checked_mul(86_400)?,
+        other => {
+            tracing::warn!(
+                "[storage] sweeper_interval = {s:?}: unknown unit {other:?}, using default"
+            );
+            return None;
+        }
+    };
+    Some(std::time::Duration::from_secs(secs))
 }
 
 /// Build the v1 placeholder embedder. Returns `Arc<dyn Embedder>`. The

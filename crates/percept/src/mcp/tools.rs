@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use percept_ingest::Metrics;
 use percept_store::{
-    filter_hash, Anchor, ColdStore, Cursor, CursorError, Embedder, HotRings, VectorFilter,
-    VectorIndex, WindowFilter,
+    filter_hash, resolve_effective, Anchor, ColdStore, Cursor, CursorError, EffectiveRetention,
+    Embedder, HotRings, RetentionPolicy, VectorFilter, VectorIndex, WindowFilter,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -54,6 +54,8 @@ pub struct DescribeSourcesEntry {
     pub descriptor: percept_core::ResolvedDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recent_errors: Option<percept_ingest::RecentErrors>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_retention: Option<EffectiveRetention>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,14 +114,19 @@ pub enum ToolError {
 pub fn describe_sources(
     registry: &DescriptorRegistry,
     metrics: &Metrics,
+    retention_policies: &[RetentionPolicy],
     args: DescribeSourcesArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let rows = registry.filter(args.source_filter.as_deref(), args.kind_filter.as_deref())?;
     let entries: Vec<DescribeSourcesEntry> = rows
         .into_iter()
-        .map(|d| DescribeSourcesEntry {
-            recent_errors: metrics.recent_errors(&d.source_id),
-            descriptor: d.clone(),
+        .map(|d| {
+            let eff = resolve_effective(retention_policies, &d.source_id, &d.kind);
+            DescribeSourcesEntry {
+                recent_errors: metrics.recent_errors(&d.source_id),
+                effective_retention: if eff.is_empty() { None } else { Some(eff) },
+                descriptor: d.clone(),
+            }
         })
         .collect();
     Ok(json!({ "sources": entries }))
