@@ -1,0 +1,39 @@
+# Sample Percept configuration shipped in the v0.1.0 container at
+# /etc/percept/percept.toml. Operators should treat this as a starting
+# point; in particular: set the *_env environment variables before
+# pointing producers at the running container.
+
+[server]
+data_dir = "/var/lib/percept"
+profile  = "edge"
+
+[mcp]
+listen    = "0.0.0.0:7878"
+transport = "http-streamable"
+# Required: set PERCEPT_MCP_TOKEN to the bearer the LLM agent will use.
+auth      = { token_env = "PERCEPT_MCP_TOKEN" }
+
+[storage]
+sweeper_interval = "1h"
+# Embedding stays off by default; flip with `embed = true` per kind /
+# source, or set `embed_default = true` here.
+embed_default    = false
+
+# Sensible retention defaults — adjust per producer.
+[[retention]]
+match.kind = "ble.advert"
+max_age    = "24h"
+
+[[retention]]
+match.kind = "object_detected"
+max_age    = "30d"
+
+# A single starter token for `/ingest`. Producers should be given their
+# own scoped tokens in production; this entry exists so the image's
+# default config doesn't reject every request out of the box.
+[[http_token]]
+name             = "default"
+token_env        = "PERCEPT_INGEST_TOKEN"
+allow_source_ids = ["*"]
+allow_kinds      = ["*"]
+rate_limit       = "1000/s"
