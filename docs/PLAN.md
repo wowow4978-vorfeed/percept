@@ -114,7 +114,10 @@ kinds resolving to the latest registered version).
 - An MCP client can call both tools and receives canonical Event-shape JSON.
 - `describe_sources` ≤ 50 ms p99 on a 100-source config.
 
-**Status:** ☐
+**Status:** ☑ (this PR). MCP server is hand-rolled (JSON-RPC over HTTP)
+rather than `rmcp`-backed — the wire surface we need is small enough that
+tracking the `rmcp` crate's API churn isn't worth it. Swap is mechanical
+when sampling / SSE-streamed responses become needed.
 
 ---
 

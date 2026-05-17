@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -17,6 +17,29 @@ pub struct Metrics {
     shed_by_reason: RwLock<HashMap<String, AtomicU64>>,
     per_token_accepted: RwLock<HashMap<String, AtomicU64>>,
     per_token_shed: RwLock<HashMap<String, AtomicU64>>,
+    per_source_errors: RwLock<HashMap<String, SourceErrors>>,
+    mcp_calls: RwLock<HashMap<String, McpMethodStats>>,
+}
+
+#[derive(Default)]
+struct McpMethodStats {
+    count: AtomicU64,
+    /// Sum of observed latencies in ms; combine with `count` for a mean.
+    /// True percentiles need a histogram — defer until slice budget allows.
+    total_latency_ms: AtomicU64,
+}
+
+#[derive(Default)]
+struct SourceErrors {
+    by_reason: HashMap<String, AtomicU64>,
+    last_error_ts_ms_utc: AtomicI64,
+}
+
+/// Per-source digest surfaced by `describe_sources` in the MCP layer.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RecentErrors {
+    pub counters: HashMap<String, u64>,
+    pub last_error_ts_ms_utc: i64,
 }
 
 impl Metrics {
@@ -45,6 +68,82 @@ impl Metrics {
         if let Some(name) = token_name {
             self.inc_in_map(&self.per_token_shed, name);
         }
+    }
+
+    /// Record an error (shed or schema-fail) against a known `source_id`.
+    /// Called only when the source_id parsed from the request — auth
+    /// failures on a malformed payload don't have one.
+    pub fn inc_source_error(&self, source_id: &str, reason: &str, now_ms: i64) {
+        // Fast path: source + reason both already known.
+        {
+            let read = self.per_source_errors.read();
+            if let Some(s) = read.get(source_id) {
+                if let Some(c) = s.by_reason.get(reason) {
+                    c.fetch_add(1, Ordering::Relaxed);
+                    s.last_error_ts_ms_utc.store(now_ms, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        // Slow path: insert source or reason (needs `&mut` on the inner map).
+        let mut write = self.per_source_errors.write();
+        let entry = write
+            .entry(source_id.to_string())
+            .or_default();
+        let counter = entry
+            .by_reason
+            .entry(reason.to_string())
+            .or_insert_with(|| AtomicU64::new(0));
+        counter.fetch_add(1, Ordering::Relaxed);
+        entry.last_error_ts_ms_utc.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// Record an MCP tool/method call and its observed wall-time.
+    pub fn inc_mcp_call(&self, method: &str, latency_ms: u64) {
+        {
+            let read = self.mcp_calls.read();
+            if let Some(s) = read.get(method) {
+                s.count.fetch_add(1, Ordering::Relaxed);
+                s.total_latency_ms.fetch_add(latency_ms, Ordering::Relaxed);
+                return;
+            }
+        }
+        let mut write = self.mcp_calls.write();
+        let entry = write
+            .entry(method.to_string())
+            .or_default();
+        entry.count.fetch_add(1, Ordering::Relaxed);
+        entry
+            .total_latency_ms
+            .fetch_add(latency_ms, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn mcp_call_count(&self, method: &str) -> u64 {
+        self.mcp_calls
+            .read()
+            .get(method)
+            .map_or(0, |s| s.count.load(Ordering::Relaxed))
+    }
+
+    /// Digest used by `describe_sources` for the `recent_errors` field.
+    #[must_use]
+    pub fn recent_errors(&self, source_id: &str) -> Option<RecentErrors> {
+        let map = self.per_source_errors.read();
+        let s = map.get(source_id)?;
+        let counters = s
+            .by_reason
+            .iter()
+            .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
+            .filter(|(_, n)| *n > 0)
+            .collect::<HashMap<_, _>>();
+        if counters.is_empty() {
+            return None;
+        }
+        Some(RecentErrors {
+            counters,
+            last_error_ts_ms_utc: s.last_error_ts_ms_utc.load(Ordering::Relaxed),
+        })
     }
 
     fn inc_in_map(&self, map: &RwLock<HashMap<String, AtomicU64>>, key: &str) {
@@ -134,6 +233,26 @@ impl Metrics {
                 out,
                 "percept_token_shed_total{{token=\"{name}\"}} {}",
                 c.load(Ordering::Relaxed)
+            );
+        }
+
+        let _ = writeln!(out, "# HELP percept_mcp_calls_total MCP method call count.");
+        let _ = writeln!(out, "# TYPE percept_mcp_calls_total counter");
+        let _ = writeln!(
+            out,
+            "# HELP percept_mcp_latency_ms_sum Sum of MCP method wall-time in ms."
+        );
+        let _ = writeln!(out, "# TYPE percept_mcp_latency_ms_sum counter");
+        for (method, s) in self.mcp_calls.read().iter() {
+            let _ = writeln!(
+                out,
+                "percept_mcp_calls_total{{method=\"{method}\"}} {}",
+                s.count.load(Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                out,
+                "percept_mcp_latency_ms_sum{{method=\"{method}\"}} {}",
+                s.total_latency_ms.load(Ordering::Relaxed)
             );
         }
         out

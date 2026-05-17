@@ -81,16 +81,21 @@ async fn ingest(headers: HeaderMap, State(s): State<HttpState>, body: Bytes) -> 
     // Per-event scope + size checks happen first; if any event fails, the
     // whole batch is rejected. (We don't partially-accept — keeps the
     // counter accounting honest for the producer.)
+    let now_ms = percept_core::now_ms_utc();
     for e in &events {
         if !scope.allows(&e.source_id, &e.kind) {
             s.metrics
                 .inc_shed(ShedReason::Unauthorized.as_str(), Some(&scope.name));
+            s.metrics
+                .inc_source_error(&e.source_id, ShedReason::Unauthorized.as_str(), now_ms);
             return shed_response(ShedReason::Unauthorized, None);
         }
         let size = approx_semantic_size(&e.semantic);
         if size > s.hard_cap_bytes {
             s.metrics
                 .inc_shed(ShedReason::PayloadTooLarge.as_str(), Some(&scope.name));
+            s.metrics
+                .inc_source_error(&e.source_id, ShedReason::PayloadTooLarge.as_str(), now_ms);
             return shed_response(ShedReason::PayloadTooLarge, None);
         }
         if size > s.soft_cap_bytes {
@@ -103,11 +108,16 @@ async fn ingest(headers: HeaderMap, State(s): State<HttpState>, body: Bytes) -> 
     if let Some(wait) = scope.check_rate() {
         s.metrics
             .inc_shed(ShedReason::RateLimit.as_str(), Some(&scope.name));
+        for e in &events {
+            s.metrics
+                .inc_source_error(&e.source_id, ShedReason::RateLimit.as_str(), now_ms);
+        }
         return shed_response(ShedReason::RateLimit, Some(wait));
     }
 
     let mut accepted = 0;
     for e in events {
+        let source_id = e.source_id.clone();
         let env = IngestEnvelope {
             event: e,
             token_name: Some(scope.name.clone()),
@@ -117,6 +127,8 @@ async fn ingest(headers: HeaderMap, State(s): State<HttpState>, body: Bytes) -> 
             Err(mpsc::error::TrySendError::Full(_)) => {
                 s.metrics
                     .inc_shed(ShedReason::BusFull.as_str(), Some(&scope.name));
+                s.metrics
+                    .inc_source_error(&source_id, ShedReason::BusFull.as_str(), now_ms);
                 return shed_response(ShedReason::BusFull, Some(Duration::from_millis(100)));
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
