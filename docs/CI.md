@@ -6,9 +6,8 @@
 
 ### 1. Rust toolchain — pinned stable
 Pinned to **stable 1.84** via `rust-toolchain.toml` (rustfmt + clippy +
-`llvm-tools-preview` + aarch64 target included). Bumped explicitly via PR
-when a feature or fix requires it. Rationale: predictable builds; clippy
-lints don't shift under us between PRs.
+aarch64 target). Bumped explicitly via PR when a feature or fix requires it.
+Rationale: predictable builds; clippy lints don't shift under us between PRs.
 
 ### 2. Container image — yes, multi-arch on release
 Built and pushed on every `v*` tag. Target registry:
@@ -19,13 +18,10 @@ dilute the "single binary, edge profile" story.
 > The `Dockerfile` lands with the first code slice. Until then the container
 > job is gated on its presence and no-ops.
 
-### 3. Code coverage — set up, no gate
-`cargo llvm-cov` on the test job emits LCOV; the file is uploaded to Codecov
-on PRs and pushes to `main`. **No coverage threshold in v1** — we want the
-signal without yet another blocking check while the codebase is small.
-
-Codecov token: stored as the `CODECOV_TOKEN` repo secret. Public repos can
-push without one, but the token stabilises uploads.
+### 3. Code coverage — out of scope for v1
+Deferred: no `CODECOV_TOKEN` available, and the codebase is too small for
+coverage numbers to mean much yet. The `test` job just runs `cargo test`.
+Revisit when a coverage signal would actually inform decisions.
 
 ### 4. cargo-deny — strong copyleft denied
 - **Advisories:** deny all RUSTSEC advisories; build fails on unpatched
@@ -52,7 +48,7 @@ lands.
 |---|---|---|
 | `fmt` | `cargo fmt --all --check` | `ubuntu-24.04` |
 | `clippy` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | `ubuntu-24.04` |
-| `test` | `cargo llvm-cov --workspace --all-features --lcov` + Codecov upload | `ubuntu-24.04` |
+| `test` | `cargo test --workspace --all-features` | `ubuntu-24.04` |
 | `check-arm` | `cargo zigbuild --workspace --target aarch64-unknown-linux-gnu` | `ubuntu-24.04` |
 | `deny` | `cargo deny check` | `ubuntu-24.04` |
 
