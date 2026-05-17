@@ -53,7 +53,7 @@ canonical type surface used by everything downstream.
   retention with `vector_max_age > raw retention`.
 - CI (now non-vacuous) green.
 
-**Status:** ☐
+**Status:** ◐ (this PR)
 
 ---
 
