@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::config;
+use crate::{config, server};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/percept/percept.toml";
 
@@ -16,7 +16,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Run the server (Slice 0: prints the resolved descriptor map and exits).
+    /// Run the ingest server.
     Serve {
         #[arg(long, default_value = DEFAULT_CONFIG_PATH)]
         config: PathBuf,
@@ -48,17 +48,10 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         },
         Command::Serve { config: path } => {
             let cfg = config::load(&path)?;
-            let resolved = config::resolve_descriptors(&cfg);
-            tracing::info!(
-                sources = cfg.sources.len(),
-                kinds = cfg.kinds.len(),
-                resolved = resolved.len(),
-                "loaded configuration; serve is a no-op in Slice 0",
-            );
-            for r in &resolved {
-                println!("{} :: {} (v{})", r.source_id, r.kind, r.kind_version);
-            }
-            Ok(())
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(server::run(cfg))
         }
     }
 }

@@ -11,3 +11,21 @@ workspace = true
 
 [dependencies]
 percept-core = { workspace = true }
+percept-store = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+ulid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+globset = { workspace = true }
+governor = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }

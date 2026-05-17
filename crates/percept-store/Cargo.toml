@@ -11,3 +11,8 @@ workspace = true
 
 [dependencies]
 percept-core = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+ulid = { workspace = true }
