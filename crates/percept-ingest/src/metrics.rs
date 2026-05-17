@@ -19,6 +19,7 @@ pub struct Metrics {
     per_token_shed: RwLock<HashMap<String, AtomicU64>>,
     per_source_errors: RwLock<HashMap<String, SourceErrors>>,
     mcp_calls: RwLock<HashMap<String, McpMethodStats>>,
+    consumer_drops: RwLock<HashMap<String, AtomicU64>>,
 }
 
 #[derive(Default)]
@@ -70,6 +71,20 @@ impl Metrics {
         }
     }
 
+    /// Event dropped on the way to a downstream consumer (e.g. cold writer
+    /// channel full).
+    pub fn inc_consumer_drop(&self, consumer: &str) {
+        self.inc_in_map(&self.consumer_drops, consumer);
+    }
+
+    #[must_use]
+    pub fn consumer_drop_count(&self, consumer: &str) -> u64 {
+        self.consumer_drops
+            .read()
+            .get(consumer)
+            .map_or(0, |c| c.load(Ordering::Relaxed))
+    }
+
     /// Record an error (shed or schema-fail) against a known `source_id`.
     /// Called only when the source_id parsed from the request — auth
     /// failures on a malformed payload don't have one.
@@ -87,9 +102,7 @@ impl Metrics {
         }
         // Slow path: insert source or reason (needs `&mut` on the inner map).
         let mut write = self.per_source_errors.write();
-        let entry = write
-            .entry(source_id.to_string())
-            .or_default();
+        let entry = write.entry(source_id.to_string()).or_default();
         let counter = entry
             .by_reason
             .entry(reason.to_string())
@@ -109,9 +122,7 @@ impl Metrics {
             }
         }
         let mut write = self.mcp_calls.write();
-        let entry = write
-            .entry(method.to_string())
-            .or_default();
+        let entry = write.entry(method.to_string()).or_default();
         entry.count.fetch_add(1, Ordering::Relaxed);
         entry
             .total_latency_ms
@@ -253,6 +264,19 @@ impl Metrics {
                 out,
                 "percept_mcp_latency_ms_sum{{method=\"{method}\"}} {}",
                 s.total_latency_ms.load(Ordering::Relaxed)
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP percept_consumer_drops_total Events dropped on the way to a downstream consumer."
+        );
+        let _ = writeln!(out, "# TYPE percept_consumer_drops_total counter");
+        for (consumer, c) in self.consumer_drops.read().iter() {
+            let _ = writeln!(
+                out,
+                "percept_consumer_drops_total{{consumer=\"{consumer}\"}} {}",
+                c.load(Ordering::Relaxed)
             );
         }
         out

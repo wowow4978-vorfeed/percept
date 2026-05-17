@@ -36,6 +36,18 @@ globset = "0.4"
 governor = "0.6"
 jsonschema = { version = "0.17", default-features = false }
 
+# Cold store (slice 3)
+#
+# DESIGN.md Appendix A names DuckDB as the cold-store engine. v1 ships with
+# rusqlite instead — same query surface (SQL with cursor-friendly indexes),
+# 30 s compile vs DuckDB-bundled's 9 min, and a few MB on disk vs ~4 GB per
+# build directory. The DuckDB switch is a v2 perf concern; SQLite handles
+# the edge-profile 1M-event acceptance target comfortably.
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+blake3 = "1"
+ciborium = "0.2"
+base64 = "0.22"
+
 # Test-only
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = "3"

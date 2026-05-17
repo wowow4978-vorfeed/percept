@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use percept_ingest::{Auth, Pipeline, PipelineConfig, SchemaIndex, TokenScope};
+use percept_store::ColdStore;
 
 use crate::config::{self, Config, HttpToken};
 use crate::mcp::{DescriptorRegistry, McpState};
@@ -44,12 +45,28 @@ pub async fn run(cfg: Config) -> Result<()> {
     let schemas = SchemaIndex::build(&sources, &kinds).context("compiling semantic_schema")?;
     let registry = DescriptorRegistry::new(config::resolve_descriptors(&cfg));
 
-    let pipeline = Pipeline::spawn(Arc::new(auth), Arc::new(schemas), PipelineConfig::default());
+    let cold_store = match cfg.server.as_ref().map(|s| s.data_dir.clone()) {
+        Some(dir) => Some(Arc::new(
+            ColdStore::open(std::path::Path::new(&dir)).context("opening cold store")?,
+        )),
+        None => {
+            tracing::warn!("no [server].data_dir — cold store disabled");
+            None
+        }
+    };
+
+    let pipeline = Pipeline::spawn(
+        Arc::new(auth),
+        Arc::new(schemas),
+        cold_store.clone(),
+        PipelineConfig::default(),
+    );
 
     let mcp_state = McpState {
         token: Arc::new(mcp_token),
         registry: Arc::new(registry),
         hot_rings: pipeline.hot_rings.clone(),
+        cold_store,
         metrics: pipeline.metrics.clone(),
     };
 
