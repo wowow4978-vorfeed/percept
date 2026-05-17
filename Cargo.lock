@@ -1386,8 +1386,10 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "futures",
  "glob",
  "globset",
+ "percept-client",
  "percept-core",
  "percept-ingest",
  "percept-store",
@@ -1400,6 +1402,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]

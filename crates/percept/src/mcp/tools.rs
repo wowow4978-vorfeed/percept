@@ -11,8 +11,9 @@ use percept_store::{
     Embedder, HotRings, RetentionPolicy, VectorFilter, VectorIndex, WindowFilter,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
+use super::peer::{call_tool, PeerHandle, PeerStatus};
 use super::registry::DescriptorRegistry;
 
 #[derive(Debug, Default, Deserialize)]
@@ -111,36 +112,97 @@ pub enum ToolError {
     CursorMalformed,
 }
 
-pub fn describe_sources(
+pub async fn describe_sources(
     registry: &DescriptorRegistry,
     metrics: &Metrics,
     retention_policies: &[RetentionPolicy],
+    peers: &[PeerHandle],
     args: DescribeSourcesArgs,
-) -> Result<serde_json::Value, ToolError> {
+) -> Result<Value, ToolError> {
     let rows = registry.filter(args.source_filter.as_deref(), args.kind_filter.as_deref())?;
-    let entries: Vec<DescribeSourcesEntry> = rows
+    // `sources` is the union of local + peer rows. Each row carries a
+    // `peer_id` (null for local) so the LLM can attribute results.
+    let mut sources: Vec<Value> = rows
         .into_iter()
         .map(|d| {
             let eff = resolve_effective(retention_policies, &d.source_id, &d.kind);
-            DescribeSourcesEntry {
+            let entry = DescribeSourcesEntry {
                 recent_errors: metrics.recent_errors(&d.source_id),
                 effective_retention: if eff.is_empty() { None } else { Some(eff) },
                 descriptor: d.clone(),
+            };
+            let mut v = serde_json::to_value(entry).expect("serialize");
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("peer_id".into(), Value::Null);
             }
+            v
         })
         .collect();
-    Ok(json!({ "sources": entries }))
+
+    // Fan out to peers. Each peer gets its own timeout; errors / timeouts
+    // are reported per-peer rather than failing the whole call so a
+    // partial result still helps the LLM.
+    let peer_status = fan_out_describe_sources(peers, &args, &mut sources).await;
+    let mut out = json!({ "sources": sources });
+    if !peer_status.is_empty() {
+        out.as_object_mut().unwrap().insert(
+            "peer_status".into(),
+            serde_json::to_value(peer_status).unwrap(),
+        );
+    }
+    Ok(out)
 }
 
-pub fn get_current_state(
+async fn fan_out_describe_sources(
+    peers: &[PeerHandle],
+    args: &DescribeSourcesArgs,
+    sources: &mut Vec<Value>,
+) -> std::collections::HashMap<String, PeerStatus> {
+    if peers.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let client = reqwest::Client::new();
+    let payload = json!({
+        "source_filter": args.source_filter,
+        "kind_filter": args.kind_filter,
+    });
+    let futures = peers.iter().map(|p| {
+        let client = &client;
+        let payload = payload.clone();
+        async move {
+            let (status, result) = call_tool(client, p, "describe_sources", payload).await;
+            (p.id.clone(), status, result)
+        }
+    });
+    let results = futures::future::join_all(futures).await;
+    let mut map = std::collections::HashMap::new();
+    for (peer_id, status, result) in results {
+        if let (PeerStatus::Ok, Some(v)) = (&status, &result) {
+            if let Some(arr) = v.get("sources").and_then(Value::as_array) {
+                for entry in arr {
+                    let mut e = entry.clone();
+                    if let Some(obj) = e.as_object_mut() {
+                        obj.insert("peer_id".into(), Value::String(peer_id.clone()));
+                    }
+                    sources.push(e);
+                }
+            }
+        }
+        map.insert(peer_id, status);
+    }
+    map
+}
+
+pub async fn get_current_state(
     registry: &DescriptorRegistry,
     hot_rings: &HotRings,
     cold_store: Option<&ColdStore>,
+    peers: &[PeerHandle],
     args: GetCurrentStateArgs,
-) -> Result<serde_json::Value, ToolError> {
+) -> Result<Value, ToolError> {
     let rows = registry.filter(args.source_filter.as_deref(), args.kind_filter.as_deref())?;
     let now = percept_core::now_ms_utc();
-    let mut entries: Vec<CurrentStateEntry> = Vec::new();
+    let mut states: Vec<Value> = Vec::new();
     for d in rows {
         let (event, from_cold) = match hot_rings.latest(&d.source_id, &d.kind) {
             Some(event) => (Arc::unwrap_or_clone(event), false),
@@ -154,15 +216,69 @@ pub fn get_current_state(
         };
         let age_ms = now - event.ts_ms_utc;
         let stale = d.freshness_ttl_ms.is_some_and(|ttl| age_ms > ttl);
-        entries.push(CurrentStateEntry {
+        let entry = CurrentStateEntry {
             event,
             age_ms,
             stale,
             from_cold,
             descriptor: d.clone(),
-        });
+        };
+        let mut v = serde_json::to_value(entry).expect("serialize");
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("peer_id".into(), Value::Null);
+        }
+        states.push(v);
     }
-    Ok(json!({ "states": entries }))
+
+    let peer_status = fan_out_get_current_state(peers, &args, &mut states).await;
+    let mut out = json!({ "states": states });
+    if !peer_status.is_empty() {
+        out.as_object_mut().unwrap().insert(
+            "peer_status".into(),
+            serde_json::to_value(peer_status).unwrap(),
+        );
+    }
+    Ok(out)
+}
+
+async fn fan_out_get_current_state(
+    peers: &[PeerHandle],
+    args: &GetCurrentStateArgs,
+    states: &mut Vec<Value>,
+) -> std::collections::HashMap<String, PeerStatus> {
+    if peers.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let client = reqwest::Client::new();
+    let payload = json!({
+        "source_filter": args.source_filter,
+        "kind_filter": args.kind_filter,
+    });
+    let futures = peers.iter().map(|p| {
+        let client = &client;
+        let payload = payload.clone();
+        async move {
+            let (status, result) = call_tool(client, p, "get_current_state", payload).await;
+            (p.id.clone(), status, result)
+        }
+    });
+    let results = futures::future::join_all(futures).await;
+    let mut map = std::collections::HashMap::new();
+    for (peer_id, status, result) in results {
+        if let (PeerStatus::Ok, Some(v)) = (&status, &result) {
+            if let Some(arr) = v.get("states").and_then(Value::as_array) {
+                for entry in arr {
+                    let mut e = entry.clone();
+                    if let Some(obj) = e.as_object_mut() {
+                        obj.insert("peer_id".into(), Value::String(peer_id.clone()));
+                    }
+                    states.push(e);
+                }
+            }
+        }
+        map.insert(peer_id, status);
+    }
+    map
 }
 
 pub fn get_window(

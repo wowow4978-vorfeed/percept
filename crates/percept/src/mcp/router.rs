@@ -13,6 +13,7 @@ use percept_ingest::Metrics;
 use percept_store::{ColdStore, Embedder, HotRings, RetentionPolicy, VectorIndex};
 use serde_json::json;
 
+use super::peer::PeerHandle;
 use super::protocol::{
     CallParams, CallResult, InitializeResult, Request, Response as RpcResponse, RpcError,
     ServerCapabilities, ServerInfo, Tool, ToolsCapability, ToolsListResult, PROTOCOL_VERSION,
@@ -29,6 +30,7 @@ pub struct McpState {
     pub vector_index: Option<Arc<VectorIndex>>,
     pub embedder: Option<Arc<dyn Embedder>>,
     pub retention_policies: Arc<Vec<RetentionPolicy>>,
+    pub peers: Arc<Vec<PeerHandle>>,
     pub metrics: Arc<Metrics>,
 }
 
@@ -59,12 +61,12 @@ async fn handle(headers: HeaderMap, State(s): State<McpState>, body: Bytes) -> R
     }
 
     let started = Instant::now();
-    let response = dispatch(&s, &req);
+    let response = dispatch(&s, &req).await;
     record_metrics(&s.metrics, &req.method, started);
     jsonrpc(response)
 }
 
-fn dispatch(s: &McpState, req: &Request) -> RpcResponse {
+async fn dispatch(s: &McpState, req: &Request) -> RpcResponse {
     let id = req.id.clone();
     match req.method.as_str() {
         "initialize" => {
@@ -124,7 +126,7 @@ fn dispatch(s: &McpState, req: &Request) -> RpcResponse {
             .expect("serializable");
             RpcResponse::ok(id, value)
         }
-        "tools/call" => dispatch_call(s, id, req.params.clone()),
+        "tools/call" => dispatch_call(s, id, req.params.clone()).await,
         "notifications/initialized" | "notifications/cancelled" => {
             // Notifications carry no id and don't expect a response; we
             // return an empty Ok for transports that send them as a
@@ -136,7 +138,7 @@ fn dispatch(s: &McpState, req: &Request) -> RpcResponse {
     }
 }
 
-fn dispatch_call(
+async fn dispatch_call(
     s: &McpState,
     id: Option<serde_json::Value>,
     params: Option<serde_json::Value>,
@@ -155,7 +157,15 @@ fn dispatch_call(
                 Ok(a) => a,
                 Err(e) => return RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
             };
-            match tools::describe_sources(&s.registry, &s.metrics, &s.retention_policies, parsed) {
+            match tools::describe_sources(
+                &s.registry,
+                &s.metrics,
+                &s.retention_policies,
+                &s.peers,
+                parsed,
+            )
+            .await
+            {
                 Ok(v) => RpcResponse::ok(
                     id,
                     serde_json::to_value(CallResult::structured(v)).expect("serializable"),
@@ -172,8 +182,11 @@ fn dispatch_call(
                 &s.registry,
                 &s.hot_rings,
                 s.cold_store.as_deref(),
+                &s.peers,
                 parsed,
-            ) {
+            )
+            .await
+            {
                 Ok(v) => RpcResponse::ok(
                     id,
                     serde_json::to_value(CallResult::structured(v)).expect("serializable"),

@@ -44,6 +44,7 @@ async fn spawn_with_vector(
         schemas,
         cold_store.clone(),
         vector,
+        false,
         PipelineConfig::default(),
     );
 
@@ -55,6 +56,7 @@ async fn spawn_with_vector(
         vector_index: pipeline.vector_index.clone(),
         embedder: embedder_for_state,
         retention_policies: Arc::new(Vec::new()),
+        peers: Arc::new(Vec::new()),
         metrics: pipeline.metrics.clone(),
     };
 
@@ -1042,6 +1044,7 @@ async fn describe_sources_includes_effective_retention() {
         schemas,
         cold_store.clone(),
         None,
+        false,
         PipelineConfig::default(),
     );
 
@@ -1062,6 +1065,7 @@ async fn describe_sources_includes_effective_retention() {
         vector_index: None,
         embedder: None,
         retention_policies: policies,
+        peers: Arc::new(Vec::new()),
         metrics: pipeline.metrics.clone(),
     };
 

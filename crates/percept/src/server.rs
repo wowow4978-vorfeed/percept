@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
+use percept_client::Client as IngestClient;
 use percept_ingest::mqtt::{
     BrokerConfig, CompiledSubscription, MqttMetrics, MqttSubscriber, PayloadFormat, Subscription,
 };
@@ -12,8 +13,9 @@ use percept_ingest::pipeline::VectorSubsystem;
 use percept_ingest::{Auth, Pipeline, PipelineConfig, SchemaIndex, TokenScope};
 use percept_store::{ColdStore, EmbedSelector, Embedder, HashEmbedder, VectorIndex};
 
-use crate::config::{self, Config, HttpToken};
-use crate::mcp::{DescriptorRegistry, McpState};
+use crate::config::{self, Config, ForwarderEntry, HttpToken, PeerEntry};
+use crate::forwarder::{Forwarder, ForwarderConfig, ForwarderMetrics};
+use crate::mcp::{DescriptorRegistry, McpState, PeerHandle};
 use crate::sweeper::{Sweeper, SweeperConfig};
 
 /// Build the ingest + MCP pipeline from a loaded config, bind the configured
@@ -63,13 +65,30 @@ pub async fn run(cfg: Config) -> Result<()> {
     let vector = build_vector_subsystem(&cfg).context("opening vector index")?;
     let vector_index = vector.as_ref().map(|v| v.index.clone());
 
-    let pipeline = Pipeline::spawn(
+    let forwarder_enabled = !cfg.forwarders.is_empty();
+    if cfg.forwarders.len() > 1 {
+        bail!(
+            "multiple [[forwarder]] entries not supported in v1 — \
+             configure a single hub destination per edge"
+        );
+    }
+    let mut pipeline = Pipeline::spawn(
         Arc::new(auth),
         Arc::new(schemas),
         cold_store.clone(),
         vector,
+        forwarder_enabled,
         PipelineConfig::default(),
     );
+
+    // Spawn the forwarder, if configured. Takes ownership of the
+    // pipeline's forward_rx so the normalizer's fan-out lands here.
+    if let Some(forwarder_cfg) = cfg.forwarders.first() {
+        if let Some(rx) = pipeline.forward_rx.take() {
+            let forwarder = build_forwarder(forwarder_cfg, rx)?;
+            tokio::spawn(forwarder.run());
+        }
+    }
 
     // Retention policies + sweeper. Wires only if there's a cold store
     // (without one, there's nothing to sweep).
@@ -108,6 +127,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         }
     }
 
+    let peers = build_peers(&cfg.peers)?;
     let mcp_state = McpState {
         token: Arc::new(mcp_token),
         registry: Arc::new(registry),
@@ -116,6 +136,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         vector_index,
         embedder: pipeline.vector_index.as_ref().map(|_| current_embedder()),
         retention_policies,
+        peers: Arc::new(peers),
         metrics: pipeline.metrics.clone(),
     };
 
@@ -326,4 +347,42 @@ fn parse_mqtt_url(url: &str) -> Result<(String, u16)> {
         .parse()
         .with_context(|| format!("invalid port {port_str:?}"))?;
     Ok((host.to_string(), port))
+}
+
+fn build_forwarder(
+    cfg: &ForwarderEntry,
+    rx: tokio::sync::mpsc::Receiver<Arc<percept_core::Event>>,
+) -> Result<Forwarder> {
+    let token = cfg
+        .resolved_hub_token
+        .clone()
+        .ok_or_else(|| anyhow!("[forwarder \"{}\"]: hub_token not resolved", cfg.peer_id))?;
+    let client = Arc::new(IngestClient::new(&cfg.hub_url, token));
+    let fwd_cfg = ForwarderConfig {
+        peer_id: cfg.peer_id.clone(),
+        ..ForwarderConfig::default()
+    };
+    Ok(Forwarder::new(
+        rx,
+        client,
+        fwd_cfg,
+        Arc::new(ForwarderMetrics::default()),
+    ))
+}
+
+fn build_peers(cfg: &[PeerEntry]) -> Result<Vec<PeerHandle>> {
+    let mut out = Vec::with_capacity(cfg.len());
+    for p in cfg {
+        let token = p
+            .resolved_token
+            .clone()
+            .ok_or_else(|| anyhow!("[peer \"{}\"]: token not resolved", p.id))?;
+        out.push(PeerHandle {
+            id: p.id.clone(),
+            mcp_url: p.mcp_url.clone(),
+            token,
+            timeout: std::time::Duration::from_millis(p.timeout_ms.unwrap_or(1_000)),
+        });
+    }
+    Ok(out)
 }

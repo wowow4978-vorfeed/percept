@@ -17,6 +17,7 @@ workspace = true
 percept-core = { workspace = true }
 percept-store = { workspace = true }
 percept-ingest = { workspace = true }
+percept-client = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,8 +31,11 @@ globset = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 tokio = { workspace = true }
+ulid = { workspace = true }

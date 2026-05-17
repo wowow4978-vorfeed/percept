@@ -34,7 +34,7 @@ async fn spawn_harness_with_schemas(
     auth.insert(TOKEN.to_string(), scope);
     // No cold store for slice-1 ingest tests — they only care about the
     // hot-path. Cold-fallback coverage lives in tests/mcp_e2e.rs.
-    let pipeline = Pipeline::spawn(Arc::new(auth), schemas, None, None, config);
+    let pipeline = Pipeline::spawn(Arc::new(auth), schemas, None, None, false, config);
     let app = router(pipeline.http_state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

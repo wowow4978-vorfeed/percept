@@ -8,10 +8,12 @@
 //! to `rmcp` is mechanical — the tool implementations themselves are
 //! transport-agnostic.
 
+pub mod peer;
 mod protocol;
 mod registry;
 mod router;
 mod tools;
 
+pub use peer::{PeerHandle, PeerStatus};
 pub use registry::DescriptorRegistry;
 pub use router::{router, McpState};
