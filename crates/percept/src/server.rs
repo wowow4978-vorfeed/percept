@@ -5,6 +5,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
+use percept_ingest::mqtt::{
+    BrokerConfig, CompiledSubscription, MqttMetrics, MqttSubscriber, PayloadFormat, Subscription,
+};
 use percept_ingest::pipeline::VectorSubsystem;
 use percept_ingest::{Auth, Pipeline, PipelineConfig, SchemaIndex, TokenScope};
 use percept_store::{ColdStore, EmbedSelector, Embedder, HashEmbedder, VectorIndex};
@@ -87,6 +90,22 @@ pub async fn run(cfg: Config) -> Result<()> {
             },
         );
         tokio::spawn(sweeper.run());
+    }
+
+    // MQTT subscribers: one task per configured broker. Failures during
+    // subscriber bring-up are logged but don't fail startup; the rumqttc
+    // EventLoop auto-reconnects on broker outage.
+    for broker_cfg in &cfg.mqtt {
+        match build_mqtt_subscriber(
+            broker_cfg,
+            pipeline.http_state.tx.clone(),
+            pipeline.metrics.clone(),
+        ) {
+            Ok(sub) => {
+                tokio::spawn(sub.run());
+            }
+            Err(e) => tracing::error!(broker = %broker_cfg.id, err = %e, "skipping MQTT broker"),
+        }
     }
 
     let mcp_state = McpState {
@@ -223,4 +242,88 @@ fn build_vector_subsystem(cfg: &Config) -> Result<Option<VectorSubsystem>> {
         index,
         selector: Arc::new(selector),
     }))
+}
+
+fn build_mqtt_subscriber(
+    cfg: &crate::config::schema::MqttBroker,
+    tx: tokio::sync::mpsc::Sender<percept_ingest::normalizer::IngestEnvelope>,
+    metrics: Arc<percept_ingest::Metrics>,
+) -> Result<MqttSubscriber> {
+    let (host, port) = parse_mqtt_url(&cfg.url)
+        .with_context(|| format!("[[mqtt]] {:?}: parsing url {:?}", cfg.id, cfg.url))?;
+    let client_id = cfg
+        .client_id
+        .clone()
+        .unwrap_or_else(|| format!("percept-{}", cfg.id));
+    let (username, password) = match &cfg.credentials {
+        Some(c) => (c.user.clone(), c.resolved_password.clone()),
+        None => (None, None),
+    };
+    let broker = BrokerConfig {
+        id: cfg.id.clone(),
+        host,
+        port,
+        client_id,
+        username,
+        password,
+        keep_alive: std::time::Duration::from_secs(30),
+    };
+
+    let mut subs = Vec::with_capacity(cfg.subscriptions.len());
+    for s in &cfg.subscriptions {
+        let f = s.payload.as_deref().unwrap_or("json");
+        let payload = PayloadFormat::parse(f).ok_or_else(|| {
+            anyhow!(
+                "[[mqtt.subscription]] {:?}: unknown payload {:?}",
+                s.topic,
+                f
+            )
+        })?;
+        if s.kind.is_none() && s.kind_field.is_none() {
+            bail!(
+                "[[mqtt.subscription]] {:?}: must set `kind` or `kind_field`",
+                s.topic
+            );
+        }
+        let sub = Subscription {
+            topic_filter: s.topic.clone(),
+            source_id_template: s.source_id_template.clone(),
+            kind: s.kind.clone(),
+            kind_field: s.kind_field.clone(),
+            payload,
+        };
+        subs.push(
+            CompiledSubscription::compile(sub)
+                .with_context(|| format!("[[mqtt.subscription]] {:?}", s.topic))?,
+        );
+    }
+
+    Ok(MqttSubscriber::new(
+        broker,
+        subs,
+        tx,
+        Arc::new(MqttMetrics::default()),
+        metrics,
+    ))
+}
+
+/// Parse `mqtt://host:port` / `mqtts://host:port`. Slice 6 doesn't ship
+/// TLS yet — the scheme parses but a `mqtts://` URL is rejected so we
+/// fail closed rather than silently downgrade.
+fn parse_mqtt_url(url: &str) -> Result<(String, u16)> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| anyhow!("expected mqtt://host:port"))?;
+    match scheme {
+        "mqtt" => {}
+        "mqtts" => bail!("mqtts:// not yet supported in v1 — use mqtt:// and a private network"),
+        other => bail!("unknown scheme {other:?}, expected mqtt:// or mqtts://"),
+    }
+    let (host, port_str) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("expected host:port"))?;
+    let port: u16 = port_str
+        .parse()
+        .with_context(|| format!("invalid port {port_str:?}"))?;
+    Ok((host.to_string(), port))
 }

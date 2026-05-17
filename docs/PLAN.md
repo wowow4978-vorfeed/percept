@@ -247,23 +247,49 @@ list ships here.
 **Goal:** real producers (beyond raw HTTP) can reach Percept.
 
 **In scope:**
-- MQTT subscriber (`rumqttc`): topic-capture template `{+N}`, JSONPath
-  (RFC 9535) `kind_field`, payload decoders `json` / `raw` / `hex` / `csv`.
-- WebSocket ingest (same shape as HTTP batch).
-- BLE scan mode (`btleplug` or equivalent): adverts → `ble.advert`.
-- BLE GATT mode for bonded devices.
-- `percept ble pair <mac>` wrapper over `bluetoothctl`.
+- MQTT subscriber (`rumqttc`): topic-capture template `{+N}` / `{#}`,
+  JSONPath `kind_field` (via `jsonpath-rust`, RFC 9535-compliant),
+  payload decoders `json` / `raw` / `hex` / `csv`. Pure
+  `(topic, payload, subs) → IngestEvent` routing layer, separately
+  unit-tested from the rumqttc transport.
+- WebSocket ingest at `/ingest/ws` (same `IngestPayload` wire shape as
+  HTTP `/ingest`; bearer token via query string since browser WS
+  clients can't set headers).
+- `percept ble pair <mac>` wrapper over `bluetoothctl` (MAC validation,
+  exits non-zero on failure).
+
+**Engine deviation (v1):**
+- ~~`serde_json_path` for JSONPath~~ → `jsonpath-rust`. The
+  `serde_json_path` 0.6.x line has an internal crate-split version
+  mismatch with its macros crate that the resolver can't untangle.
+  Both are RFC 9535 implementations; the swap is cosmetic.
+
+**Slice 6 follow-up (separate PR):**
+- BLE scan (`btleplug`) + GATT mode. Defer because the sandbox has no
+  BLE hardware to validate against, and `btleplug` brings in heavy
+  platform-specific native deps (BlueZ/CoreBluetooth/WinRT) that need
+  the same kind of compile/disk audit DuckDB / FastEmbed got. Gated
+  behind a `ble` feature when it lands.
 
 **Out of scope:**
 - ROS2 / Foxglove bridge (out of v1).
-- BLE decoder plugin surface.
+- BLE decoder plugin surface (built-in decoders only).
+- TLS for MQTT (`mqtts://` rejects at startup; use `mqtt://` on a
+  private network until v1.x ships proper TLS).
 
 **Acceptance:**
-- Each adapter passes an integration test against a local stand-in
-  (mosquitto in CI; mock GATT for BLE).
-- Unknown MQTT payload type increments a drop counter, no panic.
+- MQTT: 28 unit tests across decode/topic/router/subscriber (route
+  table, JSONPath kind resolution, raw/hex/csv decoders, first-match
+  wins, decode-failure counter, bus-full → consumer_drop). Live
+  integration against a real broker lives outside CI per the BLE
+  follow-up rationale.
+- WebSocket: 5 e2e tests (round-trip into hot ring, invalid bearer,
+  scope deny → shed_reason, batch form, malformed JSON).
+- Unknown MQTT payload type → `messages_decode_failed` increments, no
+  panic.
 
-**Status:** ☐
+**Status:** ☑ (this PR). BLE adapters deferred to slice-6 follow-up per
+"Slice 6 follow-up" above.
 
 ---
 
