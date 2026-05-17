@@ -26,6 +26,7 @@ bytes = { workspace = true }
 parking_lot = { workspace = true }
 globset = { workspace = true }
 governor = { workspace = true }
+jsonschema = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

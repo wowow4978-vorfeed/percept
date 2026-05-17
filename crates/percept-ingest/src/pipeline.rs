@@ -14,6 +14,7 @@ use crate::auth::Auth;
 use crate::http::{HttpState, DEFAULT_HARD_CAP_BYTES, DEFAULT_SOFT_CAP_BYTES};
 use crate::metrics::Metrics;
 use crate::normalizer::{IngestEnvelope, Normalizer};
+use crate::schema::SchemaIndex;
 
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
@@ -43,12 +44,12 @@ pub struct Pipeline {
 
 impl Pipeline {
     /// Spawns the normalizer task and returns the HTTP state plus handles.
-    pub fn spawn(auth: Arc<Auth>, config: PipelineConfig) -> Self {
+    pub fn spawn(auth: Arc<Auth>, schemas: Arc<SchemaIndex>, config: PipelineConfig) -> Self {
         let metrics = Arc::new(Metrics::new());
         let hot_rings = Arc::new(HotRings::new(config.hot_ring));
         let (tx, rx) = mpsc::channel::<IngestEnvelope>(config.bus_depth);
 
-        let normalizer = Normalizer::new(rx, hot_rings.clone(), metrics.clone());
+        let normalizer = Normalizer::new(rx, hot_rings.clone(), metrics.clone(), schemas);
         let handle = tokio::spawn(normalizer.run());
 
         let http_state = HttpState {

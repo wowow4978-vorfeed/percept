@@ -83,9 +83,12 @@ canonical type surface used by everything downstream.
 - 64 KB hard cap enforced (returns `payload_too_large`).
 - Soft cap (16 KB) increments a counter, still accepts the event.
 
-**Status:** ◐ (this PR). `semantic_schema` validation runtime is descoped
-to a follow-up — the `_schema_invalid` field and counter are wired but
-the JSON Schema check is a placeholder returning `None`.
+**Status:** ☑ (PRs #5 + slice-1 follow-up). Schema validation runtime
+wired via `jsonschema` in the slice-1 follow-up: SchemaIndex compiles
+every `semantic_schema` at startup; the normalizer marks
+`_schema_invalid = true` and bumps the counter on payloads that fail
+their resolved schema (source override > kind+version, with unversioned
+kinds resolving to the latest registered version).
 
 ---
 
