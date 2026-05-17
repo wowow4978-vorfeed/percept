@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use percept_ingest::Metrics;
-use percept_store::{ColdStore, HotRings};
+use percept_store::{ColdStore, Embedder, HotRings, VectorIndex};
 use serde_json::json;
 
 use super::protocol::{
@@ -26,6 +26,8 @@ pub struct McpState {
     pub registry: Arc<DescriptorRegistry>,
     pub hot_rings: Arc<HotRings>,
     pub cold_store: Option<Arc<ColdStore>>,
+    pub vector_index: Option<Arc<VectorIndex>>,
+    pub embedder: Option<Arc<dyn Embedder>>,
     pub metrics: Arc<Metrics>,
 }
 
@@ -106,6 +108,16 @@ fn dispatch(s: &McpState, req: &Request) -> RpcResponse {
                              limit 10,000 events.",
                         input_schema: tools::get_window_input_schema(),
                     },
+                    Tool {
+                        name: "search_events",
+                        description: "Semantic search via the vector index, \
+                             with optional time / source / kind filters. \
+                             Returns the top-k hits with similarity scores \
+                             and the matching events. Requires the embedder \
+                             to be configured (see [storage].embed_default \
+                             and per-kind / per-source `embed`).",
+                        input_schema: tools::search_events_input_schema(),
+                    },
                 ],
             })
             .expect("serializable");
@@ -174,6 +186,24 @@ fn dispatch_call(
                 Err(e) => return RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
             };
             match tools::get_window(s.cold_store.as_deref(), parsed) {
+                Ok(v) => RpcResponse::ok(
+                    id,
+                    serde_json::to_value(CallResult::structured(v)).expect("serializable"),
+                ),
+                Err(e) => RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
+            }
+        }
+        "search_events" => {
+            let parsed = match serde_json::from_value(args) {
+                Ok(a) => a,
+                Err(e) => return RpcResponse::err(id, RpcError::invalid_params(e.to_string())),
+            };
+            match tools::search_events(
+                s.vector_index.as_deref(),
+                s.embedder.as_deref(),
+                s.cold_store.as_deref(),
+                parsed,
+            ) {
                 Ok(v) => RpcResponse::ok(
                     id,
                     serde_json::to_value(CallResult::structured(v)).expect("serializable"),

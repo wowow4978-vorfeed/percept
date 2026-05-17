@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use percept::mcp::{DescriptorRegistry, McpState};
 use percept_core::ResolvedDescriptor;
+use percept_ingest::pipeline::VectorSubsystem;
 use percept_ingest::{Auth, Pipeline, PipelineConfig, SchemaIndex, TokenScope};
+use percept_store::{EmbedSelector, Embedder, HashEmbedder, VectorIndex};
 use serde_json::{json, Value};
 
 const INGEST_TOKEN: &str = "ingest-token-xyz";
@@ -20,6 +22,13 @@ struct Harness {
 }
 
 async fn spawn(descriptors: Vec<ResolvedDescriptor>) -> Harness {
+    spawn_with_vector(descriptors, None).await
+}
+
+async fn spawn_with_vector(
+    descriptors: Vec<ResolvedDescriptor>,
+    vector: Option<VectorSubsystem>,
+) -> Harness {
     let mut auth = Auth::new();
     auth.insert(
         INGEST_TOKEN.to_string(),
@@ -29,10 +38,12 @@ async fn spawn(descriptors: Vec<ResolvedDescriptor>) -> Harness {
     let cold_store = Some(Arc::new(
         percept_store::ColdStore::open_in_memory().unwrap(),
     ));
+    let embedder_for_state: Option<Arc<dyn Embedder>> = vector.as_ref().map(|v| v.embedder.clone());
     let pipeline = Pipeline::spawn(
         Arc::new(auth),
         schemas,
         cold_store.clone(),
+        vector,
         PipelineConfig::default(),
     );
 
@@ -41,6 +52,8 @@ async fn spawn(descriptors: Vec<ResolvedDescriptor>) -> Harness {
         registry: Arc::new(DescriptorRegistry::new(descriptors)),
         hot_rings: pipeline.hot_rings.clone(),
         cold_store,
+        vector_index: pipeline.vector_index.clone(),
+        embedder: embedder_for_state,
         metrics: pipeline.metrics.clone(),
     };
 
@@ -732,4 +745,281 @@ async fn metrics_includes_cold_writer_counters() {
         "got: {body}"
     );
     assert!(body.contains("percept_cold_batches_committed_total"));
+}
+
+fn vector_subsystem(embed_default: bool) -> VectorSubsystem {
+    let embedder: Arc<dyn Embedder> = Arc::new(HashEmbedder::new(64));
+    let index = Arc::new(VectorIndex::open_in_memory(embedder.model_id(), embedder.dim()).unwrap());
+    let selector = Arc::new(EmbedSelector::new(embed_default));
+    VectorSubsystem {
+        embedder,
+        index,
+        selector,
+    }
+}
+
+#[tokio::test]
+async fn search_events_returns_topk_hits_by_cosine() {
+    let v = vector_subsystem(true);
+    let h = spawn_with_vector(vec![rd("cam", "scene", None)], Some(v)).await;
+    let base = percept_core::now_ms_utc();
+    for (i, txt) in [
+        "person standing on the porch",
+        "porch is empty no one in view",
+        "twenty degrees celsius reading",
+    ]
+    .iter()
+    .enumerate()
+    {
+        post_ingest(
+            &h.base,
+            json!({
+                "source_id": "cam",
+                "kind": "scene",
+                "ts_ms_utc": base + i as i64 * 10,
+                "semantic": { "text": txt }
+            }),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_events",
+                "arguments": { "query": "person porch standing", "limit": 3 }
+            }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let hits = body["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(!hits.is_empty(), "expected at least one hit: {body}");
+    assert!(hits[0]["score"].as_f64().unwrap() > 0.0);
+    assert!(hits[0]["event"]["semantic"]["text"].is_string());
+}
+
+#[tokio::test]
+async fn search_events_respects_filters() {
+    let v = vector_subsystem(true);
+    let h = spawn_with_vector(
+        vec![rd("cam.front", "scene", None), rd("therm", "temp", None)],
+        Some(v),
+    )
+    .await;
+    let base = percept_core::now_ms_utc();
+    post_ingest(
+        &h.base,
+        json!({
+            "source_id": "cam.front",
+            "kind": "scene",
+            "ts_ms_utc": base,
+            "semantic": { "text": "person walking" }
+        }),
+    )
+    .await;
+    post_ingest(
+        &h.base,
+        json!({
+            "source_id": "therm",
+            "kind": "temp",
+            "ts_ms_utc": base + 10,
+            "semantic": { "text": "person walking" }
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_events",
+                "arguments": {
+                    "query": "person walking",
+                    "kind_filter": ["scene"]
+                }
+            }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let hits = body["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["event"]["kind"], "scene");
+}
+
+#[tokio::test]
+async fn search_events_requires_vector_index() {
+    // No VectorSubsystem provided -> tool rejects with invalid_params.
+    let h = spawn(vec![rd("cam", "scene", None)]).await;
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_events",
+                "arguments": { "query": "anything" }
+            }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32_602);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("vector index"),
+        "got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn search_events_rejects_empty_query() {
+    let v = vector_subsystem(true);
+    let h = spawn_with_vector(vec![], Some(v)).await;
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_events",
+                "arguments": { "query": "  " }
+            }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32_602);
+}
+
+#[tokio::test]
+async fn search_events_rejects_invalid_time_range() {
+    let v = vector_subsystem(true);
+    let h = spawn_with_vector(vec![], Some(v)).await;
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_events",
+                "arguments": {
+                    "query": "x",
+                    "time_range": { "start_ms": 100, "end_ms": 50 }
+                }
+            }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32_602);
+}
+
+#[tokio::test]
+async fn embedder_truncates_long_payloads_and_flags_result() {
+    let v = vector_subsystem(true);
+    let h = spawn_with_vector(vec![rd("s", "k", None)], Some(v)).await;
+    // 5 KB payload — well over the 2 KB truncate threshold.
+    let big = "alpha beta gamma ".repeat(400);
+    post_ingest(
+        &h.base,
+        json!({
+            "source_id": "s",
+            "kind": "k",
+            "ts_ms_utc": percept_core::now_ms_utc(),
+            "semantic": { "text": big }
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "search_events", "arguments": { "query": "alpha beta gamma" } }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let hits = body["result"]["structuredContent"]["hits"]
+        .as_array()
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["truncated"], true);
+}
+
+#[tokio::test]
+async fn search_events_listed_in_tools_list() {
+    let v = vector_subsystem(true);
+    let h = spawn_with_vector(vec![], Some(v)).await;
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let names: Vec<&str> = body["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"search_events"));
+}
+
+#[tokio::test]
+async fn metrics_includes_embedder_counters_when_vector_enabled() {
+    let v = vector_subsystem(true);
+    let h = spawn_with_vector(vec![rd("s", "k", None)], Some(v)).await;
+    post_ingest(
+        &h.base,
+        json!({
+            "source_id": "s",
+            "kind": "k",
+            "ts_ms_utc": percept_core::now_ms_utc(),
+            "semantic": { "text": "hello world" }
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let body = reqwest::get(format!("{}/metrics", h.base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("percept_embedder_events_embedded_total"),
+        "got: {body}"
+    );
 }

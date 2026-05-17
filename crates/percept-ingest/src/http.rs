@@ -36,6 +36,7 @@ pub struct HttpState {
     pub auth: Arc<Auth>,
     pub metrics: Arc<Metrics>,
     pub cold_writer_metrics: Option<Arc<percept_store::ColdWriterMetrics>>,
+    pub embedder_metrics: Option<Arc<percept_store::EmbedderMetrics>>,
     pub tx: mpsc::Sender<IngestEnvelope>,
     pub hard_cap_bytes: usize,
     pub soft_cap_bytes: usize,
@@ -57,6 +58,9 @@ async fn metrics(State(s): State<HttpState>) -> String {
     let mut out = s.metrics.render();
     if let Some(cm) = &s.cold_writer_metrics {
         cm.render_into(&mut out);
+    }
+    if let Some(em) = &s.embedder_metrics {
+        em.render_into(&mut out);
     }
     out
 }

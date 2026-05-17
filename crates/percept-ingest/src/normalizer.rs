@@ -17,12 +17,20 @@ use tokio::sync::mpsc;
 
 use crate::metrics::Metrics;
 use crate::schema::SchemaIndex;
-use percept_store::HotRings;
+use percept_store::{EmbedSelector, HotRings};
 
 #[derive(Debug, Clone)]
 pub struct IngestEnvelope {
     pub event: crate::wire::IngestEvent,
     pub token_name: Option<String>,
+}
+
+/// Embedder fan-out target. Bundles the channel with the selector so the
+/// "should this be embedded?" check fires before we pay for an Arc clone
+/// and try_send.
+pub struct EmbedSink {
+    pub tx: mpsc::Sender<Arc<Event>>,
+    pub selector: Arc<EmbedSelector>,
 }
 
 pub struct Normalizer {
@@ -31,6 +39,7 @@ pub struct Normalizer {
     metrics: Arc<Metrics>,
     schemas: Arc<SchemaIndex>,
     cold_tx: Option<mpsc::Sender<Arc<Event>>>,
+    embed_sink: Option<EmbedSink>,
     seq_by_source: HashMap<String, u64>,
 }
 
@@ -42,6 +51,7 @@ impl Normalizer {
         metrics: Arc<Metrics>,
         schemas: Arc<SchemaIndex>,
         cold_tx: Option<mpsc::Sender<Arc<Event>>>,
+        embed_sink: Option<EmbedSink>,
     ) -> Self {
         Self {
             rx,
@@ -49,6 +59,7 @@ impl Normalizer {
             metrics,
             schemas,
             cold_tx,
+            embed_sink,
             seq_by_source: HashMap::new(),
         }
     }
@@ -59,13 +70,26 @@ impl Normalizer {
             let event = Arc::new(self.normalize(envelope.event));
             self.hot_rings.push(event.clone());
             if let Some(tx) = &self.cold_tx {
-                match tx.try_send(event) {
+                match tx.try_send(event.clone()) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         self.metrics.inc_consumer_drop("cold_writer");
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         // Cold writer task exited; treat as no cold sink.
+                    }
+                }
+            }
+            if let Some(sink) = &self.embed_sink {
+                if sink.selector.should_embed(&event.source_id, &event.kind) {
+                    match sink.tx.try_send(event) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            self.metrics.inc_consumer_drop("embedder");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            // Embedder task exited; treat as no embed sink.
+                        }
                     }
                 }
             }

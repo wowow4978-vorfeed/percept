@@ -1268,6 +1268,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "ciborium",
+ "globset",
  "parking_lot",
  "percept-core",
  "rusqlite",

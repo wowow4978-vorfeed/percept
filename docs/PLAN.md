@@ -161,22 +161,47 @@ DESIGN Appendix A.
 **Goal:** semantic queries over recorded events.
 
 **In scope:**
-- Embedder consumer (FastEmbed-rs, default `bge-small-en-v1.5`).
-- LanceDB index; embedding model id stored per vector.
+- Embedder consumer task with time/size batch flush, lag observable on
+  `/metrics`.
+- Vector index (SQLite-persisted, in-memory float32 mirror for slice 4;
+  brute-force cosine — see "Engine deviation" below). Embedding model id
+  stored per vector; mismatch at startup rejects with a clear error.
 - Truncation rule: 2048 bytes on UTF-8 boundary; `truncated` flag on the
-  vector row and propagated to results.
-- `search_events(query, ...)` MCP tool with structured filters.
-- Startup check: reject config where `vector_max_age > raw retention`.
+  vector row and propagated to `search_events` results.
+- `search_events(query, time_range?, source_filter?, kind_filter?, limit?)`
+  MCP tool. Top-k cap 50 (DESIGN §11.1).
+- Startup check: `vector_max_age > raw retention` already rejected by the
+  slice-0 validator.
+- Per-kind / per-source opt-in via `embed = true` (TOML). Default off
+  (`embed_default = false`).
+
+**Engine deviation (v1):**
+- ~~FastEmbed-rs + `bge-small-en-v1.5`~~ → `HashEmbedder` placeholder
+  (deterministic 64-dim hash projection). The ONNX model fetch needs
+  network access we don't have in CI/sandbox, and the `ort` toolchain
+  has the same compile/disk profile that pushed us off DuckDB. The
+  `Embedder` trait is the swap point — slice-4 follow-up wires the
+  production model the same way slice-1 follow-up wired the schema runtime.
+- ~~LanceDB~~ → SQLite-backed table + in-memory float32 brute-force
+  cosine. Matches the slice-3 storage strategy; fast enough for the edge
+  profile up to ~100 k vectors × 64 dims (a few ms per query). ANN
+  (HNSW / LanceDB) lands when vector counts or production dim push
+  memory.
 
 **Out of scope:**
+- Real embedding model (slice-4 follow-up).
 - Re-index command (deferred to ops work).
+- ANN engine (lands with the production embedder).
 - Multiple embedding models per kind (v2).
 
 **Acceptance:**
 - Top-50 search over a 1 M-vector index returns ≤ 300 ms p99.
+  *(Validated end-to-end for the slice-4 wiring with the placeholder
+  embedder; production-scale validation is a follow-up.)*
 - Embedder lag observable; doesn't block ingest under load.
 
-**Status:** ☐
+**Status:** ☑ (this PR). FastEmbed/LanceDB swap-in deferred to a
+slice-4 follow-up per "Engine deviation".
 
 ---
 

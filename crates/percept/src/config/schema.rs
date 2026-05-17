@@ -275,6 +275,11 @@ pub struct SourceEntry {
     pub freshness_ttl_ms: Option<i64>,
     #[serde(default)]
     pub location: Option<String>,
+    /// Per-source override for the embedder opt-in (DECISIONS §2).
+    /// Takes precedence over the kind-level `embed` and the
+    /// `[storage].embed_default`.
+    #[serde(default)]
+    pub embed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,4 +298,8 @@ pub struct KindEntry {
     pub semantic_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub units: Option<String>,
+    /// Per-kind opt-in for the embedder; overridden by a source-level
+    /// `embed` when both are set.
+    #[serde(default)]
+    pub embed: Option<bool>,
 }
