@@ -4,9 +4,10 @@
 //! `seq` is a per-`source_id` monotonic counter — trivially correct because
 //! the normalizer runs as one task (DECISIONS §7).
 //!
-//! Schema validation (DESIGN §5.2) is wired structurally — `_schema_invalid`
-//! and the counter exist — but the JSON Schema runtime is descoped from
-//! Slice 1. See the TODO in `validate_semantic`.
+//! Schema validation is soft-fail (DESIGN §5.2): a payload that doesn't
+//! conform to its descriptor's `semantic_schema` is stored with
+//! `_schema_invalid = true` and the counter is incremented; the event still
+//! lands in the hot ring.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use percept_core::{new_event_id, now_ms_utc, Event};
 use tokio::sync::mpsc;
 
 use crate::metrics::Metrics;
+use crate::schema::SchemaIndex;
 use percept_store::HotRings;
 
 #[derive(Debug, Clone)]
@@ -27,6 +29,7 @@ pub struct Normalizer {
     rx: mpsc::Receiver<IngestEnvelope>,
     hot_rings: Arc<HotRings>,
     metrics: Arc<Metrics>,
+    schemas: Arc<SchemaIndex>,
     seq_by_source: HashMap<String, u64>,
 }
 
@@ -36,11 +39,13 @@ impl Normalizer {
         rx: mpsc::Receiver<IngestEnvelope>,
         hot_rings: Arc<HotRings>,
         metrics: Arc<Metrics>,
+        schemas: Arc<SchemaIndex>,
     ) -> Self {
         Self {
             rx,
             hot_rings,
             metrics,
+            schemas,
             seq_by_source: HashMap::new(),
         }
     }
@@ -64,13 +69,21 @@ impl Normalizer {
         let ingest_ts = now_ms_utc();
         let trace_id = Some(e.trace_id.unwrap_or_else(|| new_event_id().to_string()));
 
-        let schema_invalid = validate_semantic(&e.kind, &e.semantic);
-        if schema_invalid == Some(true) {
+        let validation = self.schemas.validate(&e.source_id, &e.kind, &e.semantic);
+        if validation == Some(true) {
             self.metrics.inc_schema_invalid();
         }
+        // Only set `_schema_invalid` when validation actually failed; absent
+        // when the payload passed or when no schema applied.
+        let schema_invalid = if validation == Some(true) {
+            Some(true)
+        } else {
+            None
+        };
 
-        // Kind version resolution against the DescriptorIndex lands with
-        // the MCP work in slice 2; Slice 1 keeps `e.kind` as-sent.
+        // Kind version canonicalization is intentionally not done here —
+        // Event.kind is preserved as-sent (DESIGN §3.1 permits either form).
+        // Schema lookup already resolves "latest" internally.
 
         Event {
             event_id,
@@ -86,13 +99,4 @@ impl Normalizer {
             schema_invalid,
         }
     }
-}
-
-/// Slice 1 placeholder: returns `None` (validation skipped).
-///
-/// TODO Slice 2/3: wire `jsonschema` against the resolved descriptor's
-/// `semantic_schema`. The `_schema_invalid` field and counter are already
-/// in place so the upgrade is one function.
-fn validate_semantic(_kind: &str, _semantic: &serde_json::Value) -> Option<bool> {
-    None
 }

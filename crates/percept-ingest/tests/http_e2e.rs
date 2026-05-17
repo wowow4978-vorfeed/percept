@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use percept_ingest::{router, Auth, Pipeline, PipelineConfig, TokenScope};
+use percept_ingest::{router, Auth, Pipeline, PipelineConfig, SchemaIndex, TokenScope};
 use percept_store::HotRings;
 use serde_json::json;
 
@@ -22,9 +22,17 @@ struct Harness {
 }
 
 async fn spawn_harness(config: PipelineConfig, scope: TokenScope) -> Harness {
+    spawn_harness_with_schemas(config, scope, Arc::new(SchemaIndex::default())).await
+}
+
+async fn spawn_harness_with_schemas(
+    config: PipelineConfig,
+    scope: TokenScope,
+    schemas: Arc<SchemaIndex>,
+) -> Harness {
     let mut auth = Auth::new();
     auth.insert(TOKEN.to_string(), scope);
-    let pipeline = Pipeline::spawn(Arc::new(auth), config);
+    let pipeline = Pipeline::spawn(Arc::new(auth), schemas, config);
     let app = router(pipeline.http_state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -360,4 +368,111 @@ async fn per_source_seq_is_monotonic_per_source() {
     for (i, e) in snap.events.iter().enumerate() {
         assert_eq!(e.seq, Some((i + 1) as u64));
     }
+}
+
+fn kind_descriptor(
+    name: &str,
+    version: &str,
+    schema: serde_json::Value,
+) -> percept_core::KindDescriptor {
+    percept_core::KindDescriptor {
+        kind: name.to_string(),
+        version: version.to_string(),
+        description: String::new(),
+        usage: String::new(),
+        caveats: String::new(),
+        semantic_schema: Some(schema),
+        units: None,
+        updated_ts_ms_utc: 0,
+    }
+}
+
+#[tokio::test]
+async fn invalid_semantic_sets_schema_invalid_and_increments_counter() {
+    // Schema requires { "celsius": <number> }; producer sends garbage.
+    let kind = kind_descriptor(
+        "temperature",
+        "v1",
+        json!({
+            "type": "object",
+            "required": ["celsius"],
+            "properties": { "celsius": { "type": "number" } }
+        }),
+    );
+    let schemas = Arc::new(SchemaIndex::build(&[], &[kind]).unwrap());
+    let h =
+        spawn_harness_with_schemas(PipelineConfig::default(), permissive_scope(), schemas).await;
+
+    let bad_body = json!({
+        "source_id": "therm.kitchen",
+        "kind": "temperature",
+        "ts_ms_utc": 0_i64,
+        "semantic": { "fahrenheit": 70 }
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{}/ingest", h.base))
+        .bearer_auth(TOKEN)
+        .json(&bad_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "invalid schema is soft-fail");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let e = h
+        .hot_rings
+        .latest("therm.kitchen", "temperature")
+        .expect("event landed");
+    assert_eq!(
+        e.schema_invalid,
+        Some(true),
+        "_schema_invalid should be set on a payload that violates the schema"
+    );
+    assert_eq!(
+        h.metrics
+            .schema_invalid_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test]
+async fn valid_semantic_leaves_schema_invalid_unset() {
+    let kind = kind_descriptor(
+        "temperature",
+        "v1",
+        json!({
+            "type": "object",
+            "required": ["celsius"],
+            "properties": { "celsius": { "type": "number" } }
+        }),
+    );
+    let schemas = Arc::new(SchemaIndex::build(&[], &[kind]).unwrap());
+    let h =
+        spawn_harness_with_schemas(PipelineConfig::default(), permissive_scope(), schemas).await;
+
+    let good = json!({
+        "source_id": "therm.kitchen",
+        "kind": "temperature",
+        "ts_ms_utc": 0_i64,
+        "semantic": { "celsius": 20.5 }
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{}/ingest", h.base))
+        .bearer_auth(TOKEN)
+        .json(&good)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let e = h.hot_rings.latest("therm.kitchen", "temperature").unwrap();
+    assert_eq!(e.schema_invalid, None);
+    assert_eq!(
+        h.metrics
+            .schema_invalid_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }

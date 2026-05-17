@@ -6,9 +6,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
-use percept_ingest::{Auth, Pipeline, PipelineConfig, TokenScope};
+use percept_ingest::{Auth, Pipeline, PipelineConfig, SchemaIndex, TokenScope};
 
-use crate::config::{Config, HttpToken};
+use crate::config::{self, Config, HttpToken};
 
 /// Build the ingest pipeline from a loaded config, bind the configured MCP
 /// listen address (Slice 1 reuses it for the HTTP ingest), and serve until
@@ -30,7 +30,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         tracing::warn!("no [[http_token]] entries — /ingest will reject every request");
     }
 
-    let pipeline = Pipeline::spawn(Arc::new(auth), PipelineConfig::default());
+    let sources = config::build_source_descriptors(&cfg);
+    let kinds = config::build_kind_descriptors(&cfg);
+    let schemas = SchemaIndex::build(&sources, &kinds).context("compiling semantic_schema")?;
+
+    let pipeline = Pipeline::spawn(Arc::new(auth), Arc::new(schemas), PipelineConfig::default());
     let app = percept_ingest::router(pipeline.http_state.clone());
 
     let listener = tokio::net::TcpListener::bind(addr)

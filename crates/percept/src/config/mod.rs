@@ -72,6 +72,18 @@ pub fn resolve_descriptors(cfg: &Config) -> Vec<ResolvedDescriptor> {
     out
 }
 
+/// Build the canonical `SourceDescriptor` list from `[[source]]` entries.
+#[must_use]
+pub fn build_source_descriptors(cfg: &Config) -> Vec<SourceDescriptor> {
+    cfg.sources.iter().map(source_descriptor).collect()
+}
+
+/// Build the canonical `KindDescriptor` list from `[[kind]]` entries.
+#[must_use]
+pub fn build_kind_descriptors(cfg: &Config) -> Vec<KindDescriptor> {
+    cfg.kinds.iter().map(kind_descriptor).collect()
+}
+
 fn source_descriptor(s: &SourceEntry) -> SourceDescriptor {
     SourceDescriptor {
         source_id: s.id.clone(),
