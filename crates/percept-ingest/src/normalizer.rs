@@ -72,6 +72,8 @@ impl Normalizer {
         let validation = self.schemas.validate(&e.source_id, &e.kind, &e.semantic);
         if validation == Some(true) {
             self.metrics.inc_schema_invalid();
+            self.metrics
+                .inc_source_error(&e.source_id, "schema_invalid", ingest_ts);
         }
         // Only set `_schema_invalid` when validation actually failed; absent
         // when the payload passed or when no schema applied.

@@ -13,7 +13,7 @@ pub mod wire;
 
 pub use auth::{Auth, ShedReason, TokenScope};
 pub use http::router;
-pub use metrics::Metrics;
+pub use metrics::{Metrics, RecentErrors};
 pub use normalizer::Normalizer;
 pub use pipeline::{Pipeline, PipelineConfig};
 pub use schema::{SchemaError, SchemaIndex};

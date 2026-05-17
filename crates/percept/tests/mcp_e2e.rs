@@ -1,0 +1,447 @@
+//! End-to-end MCP tests: spin up the full ingest + MCP server in-process,
+//! POST an event via `/ingest`, then exercise `initialize`, `tools/list`,
+//! and both `tools/call` flows via `/mcp`.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use percept::mcp::{DescriptorRegistry, McpState};
+use percept_core::ResolvedDescriptor;
+use percept_ingest::{Auth, Pipeline, PipelineConfig, SchemaIndex, TokenScope};
+use serde_json::{json, Value};
+
+const INGEST_TOKEN: &str = "ingest-token-xyz";
+const MCP_TOKEN: &str = "mcp-token-xyz";
+
+struct Harness {
+    base: String,
+    _server: tokio::task::JoinHandle<()>,
+}
+
+async fn spawn(descriptors: Vec<ResolvedDescriptor>) -> Harness {
+    let mut auth = Auth::new();
+    auth.insert(
+        INGEST_TOKEN.to_string(),
+        TokenScope::build("test", &["*".into()], &["*".into()], None).unwrap(),
+    );
+    let schemas = Arc::new(SchemaIndex::default());
+    let pipeline = Pipeline::spawn(Arc::new(auth), schemas, PipelineConfig::default());
+
+    let mcp_state = McpState {
+        token: Arc::new(MCP_TOKEN.to_string()),
+        registry: Arc::new(DescriptorRegistry::new(descriptors)),
+        hot_rings: pipeline.hot_rings.clone(),
+        metrics: pipeline.metrics.clone(),
+    };
+
+    let app =
+        percept_ingest::router(pipeline.http_state.clone()).merge(percept::mcp::router(mcp_state));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    Harness {
+        base: format!("http://{addr}"),
+        _server: server,
+    }
+}
+
+fn rd(src: &str, kind: &str, ttl: Option<i64>) -> ResolvedDescriptor {
+    ResolvedDescriptor {
+        source_id: src.to_string(),
+        kind: kind.to_string(),
+        kind_version: "v1".to_string(),
+        description: format!("descriptor for {src}"),
+        usage: String::new(),
+        caveats: String::new(),
+        semantic_schema: None,
+        units: None,
+        sampling_hint_ms: None,
+        freshness_ttl_ms: ttl,
+        location: None,
+    }
+}
+
+async fn post_mcp(base: &str, token: &str, body: Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{base}/mcp"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_ingest(base: &str, body: Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{base}/ingest"))
+        .bearer_auth(INGEST_TOKEN)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn missing_bearer_returns_401() {
+    let h = spawn(vec![]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/mcp", h.base))
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[tokio::test]
+async fn wrong_bearer_returns_401() {
+    let h = spawn(vec![]).await;
+    let resp = post_mcp(
+        &h.base,
+        "wrong",
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+#[tokio::test]
+async fn initialize_returns_capabilities() {
+    let h = spawn(vec![]).await;
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.0.0" }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    assert_eq!(body["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(body["result"]["serverInfo"]["name"], "percept");
+    assert!(body["result"]["capabilities"]["tools"].is_object());
+}
+
+#[tokio::test]
+async fn tools_list_returns_both_tools() {
+    let h = spawn(vec![]).await;
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let tools = body["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"describe_sources"));
+    assert!(names.contains(&"get_current_state"));
+    // Every tool must carry a JSON-Schema input shape.
+    for t in tools {
+        assert!(t["inputSchema"].is_object());
+    }
+}
+
+#[tokio::test]
+async fn unknown_method_returns_method_not_found() {
+    let h = spawn(vec![]).await;
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "bogus/method" }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], -32_601);
+}
+
+#[tokio::test]
+async fn describe_sources_returns_registry_rows() {
+    let h = spawn(vec![
+        rd("cam.front", "object_detected", Some(60_000)),
+        rd("therm.kitchen", "temperature", Some(300_000)),
+    ])
+    .await;
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "describe_sources",
+                "arguments": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let sc = &body["result"]["structuredContent"];
+    let sources = sc["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2);
+    let source_ids: Vec<&str> = sources
+        .iter()
+        .map(|s| s["source_id"].as_str().unwrap())
+        .collect();
+    assert!(source_ids.contains(&"cam.front"));
+    assert!(source_ids.contains(&"therm.kitchen"));
+}
+
+#[tokio::test]
+async fn describe_sources_filter_glob_narrows() {
+    let h = spawn(vec![
+        rd("cam.front", "object_detected", None),
+        rd("cam.back", "object_detected", None),
+        rd("therm.kitchen", "temperature", None),
+    ])
+    .await;
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "describe_sources",
+                "arguments": { "source_filter": ["cam.*"] }
+            }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let sources = body["result"]["structuredContent"]["sources"]
+        .as_array()
+        .unwrap();
+    assert_eq!(sources.len(), 2);
+}
+
+#[tokio::test]
+async fn describe_sources_includes_recent_errors_after_failure() {
+    // Configure the source so it's in the registry, then trigger a
+    // payload-too-large shed; describe_sources should surface the digest.
+    let h = spawn(vec![rd("cam.front", "object_detected", None)]).await;
+
+    let huge = json!({
+        "source_id": "cam.front",
+        "kind": "object_detected",
+        "ts_ms_utc": 0_i64,
+        "semantic": { "blob": "x".repeat(200_000) }
+    });
+    let resp = post_ingest(&h.base, huge).await;
+    assert_eq!(resp.status().as_u16(), 429);
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "describe_sources", "arguments": {} }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let row = &body["result"]["structuredContent"]["sources"][0];
+    assert_eq!(row["source_id"], "cam.front");
+    assert_eq!(
+        row["recent_errors"]["counters"]["payload_too_large"], 1,
+        "got: {row}"
+    );
+    assert!(
+        row["recent_errors"]["last_error_ts_ms_utc"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[tokio::test]
+async fn get_current_state_returns_canonical_event_shape() {
+    let h = spawn(vec![rd("cam.front", "object_detected", Some(60_000))]).await;
+
+    // Ingest an event so the hot ring has something.
+    let resp = post_ingest(
+        &h.base,
+        json!({
+            "source_id": "cam.front",
+            "kind": "object_detected",
+            "ts_ms_utc": percept_core::now_ms_utc(),
+            "semantic": { "label": "person", "confidence": 0.9 }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Let the normalizer drain.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let body = loop {
+        let resp = post_mcp(
+            &h.base,
+            MCP_TOKEN,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "get_current_state", "arguments": {} }
+            }),
+        )
+        .await;
+        let body: Value = resp.json().await.unwrap();
+        if !body["result"]["structuredContent"]["states"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+        {
+            break body;
+        }
+        if Instant::now() > deadline {
+            panic!("event never reached the hot ring");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+
+    let state = &body["result"]["structuredContent"]["states"][0];
+    let event = &state["event"];
+    // Canonical Event-shape JSON: required fields per DESIGN §3.1.
+    assert!(event["event_id"].is_string());
+    assert_eq!(event["source_id"], "cam.front");
+    assert_eq!(event["kind"], "object_detected");
+    assert!(event["ts_ms_utc"].is_number());
+    assert!(event["semantic"].is_object());
+    assert!(event["ingest_ts_ms_utc"].is_number());
+    assert_eq!(event["seq"], 1);
+    assert!(event["trace_id"].is_string());
+
+    // Derived fields.
+    assert!(state["age_ms"].as_i64().unwrap() >= 0);
+    assert_eq!(state["from_cold"], false);
+    assert_eq!(state["stale"], false);
+    assert_eq!(state["descriptor"]["source_id"], "cam.front");
+}
+
+#[tokio::test]
+async fn get_current_state_marks_stale_when_age_exceeds_ttl() {
+    // freshness_ttl_ms = 1ms makes "stale" trivially true: by the time the
+    // MCP call returns, the event is older than 1 ms.
+    let h = spawn(vec![rd("therm.kitchen", "temperature", Some(1))]).await;
+
+    post_ingest(
+        &h.base,
+        json!({
+            "source_id": "therm.kitchen",
+            "kind": "temperature",
+            "ts_ms_utc": percept_core::now_ms_utc(),
+            "semantic": { "celsius": 20 }
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "get_current_state", "arguments": {} }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let state = &body["result"]["structuredContent"]["states"][0];
+    assert_eq!(state["stale"], true);
+}
+
+#[tokio::test]
+async fn get_current_state_filter_glob_narrows() {
+    let h = spawn(vec![
+        rd("cam.front", "object_detected", None),
+        rd("cam.back", "object_detected", None),
+        rd("therm.kitchen", "temperature", None),
+    ])
+    .await;
+
+    for src in &["cam.front", "cam.back", "therm.kitchen"] {
+        post_ingest(
+            &h.base,
+            json!({
+                "source_id": src,
+                "kind": if src.starts_with("cam") { "object_detected" } else { "temperature" },
+                "ts_ms_utc": percept_core::now_ms_utc(),
+                "semantic": {}
+            }),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let resp = post_mcp(
+        &h.base,
+        MCP_TOKEN,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_current_state",
+                "arguments": { "kind_filter": ["object_detected"] }
+            }
+        }),
+    )
+    .await;
+    let body: Value = resp.json().await.unwrap();
+    let states = body["result"]["structuredContent"]["states"]
+        .as_array()
+        .unwrap();
+    assert_eq!(states.len(), 2);
+    for s in states {
+        assert_eq!(s["event"]["kind"], "object_detected");
+    }
+}
+
+#[tokio::test]
+async fn metrics_records_mcp_call_count() {
+    let h = spawn(vec![]).await;
+    for _ in 0..3 {
+        post_mcp(
+            &h.base,
+            MCP_TOKEN,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        )
+        .await;
+    }
+    let body = reqwest::get(format!("{}/metrics", h.base))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        body.contains("percept_mcp_calls_total{method=\"tools/list\"} 3"),
+        "got: {body}"
+    );
+}
