@@ -369,21 +369,37 @@ a slice-8 follow-up.
 **Goal:** first tagged release with a working image.
 
 **In scope:**
-- `Dockerfile` (multi-stage: rust builder → `debian:bookworm-slim`
-  runtime; ONNX Runtime shared libs bundled).
-- Sample `percept.toml` shipped at `/etc/percept/percept.toml` in the image.
-- Tag `v0.1.0` triggers `release.yml`: tarballs (x86_64 + aarch64) + GHCR
-  multi-arch image.
+- `Dockerfile` (multi-stage: `rust:1.85-bookworm` builder →
+  `debian:bookworm-slim` runtime; tini as PID 1; non-root user
+  `percept` (uid 1000); CA certs for outbound TLS from the forwarder
+  and federation peers).
+- Sample `percept.toml` shipped at `/etc/percept/percept.toml`; covers
+  [server] + [mcp] + [storage] + a starter `[[http_token]]` so the
+  default image doesn't reject every ingest out of the box.
+- Tag `v0.1.0` triggers `release.yml`: native-arch tarballs
+  (x86_64 + aarch64) + multi-arch GHCR image (`linux/amd64`,
+  `linux/arm64`).
+
+**Slice-4 follow-up makes this simpler:**
+- ~~ONNX Runtime shared libs bundled~~ — slice 4 shipped a deterministic
+  `HashEmbedder` placeholder, so the runtime image needs zero ONNX
+  libs. The Dockerfile shrinks to ca-certificates + tini on top of
+  bookworm-slim (~30 MB base).
 
 **Out of scope:**
-- Distroless image (later — needs ONNX Runtime musl story).
+- Distroless image (later — re-evaluate once the real embedder lands
+  and we know its native-deps story).
 
 **Acceptance:**
-- `docker run ghcr.io/wowow4978-vorfeed/percept:v0.1.0 percept config check`
-  exits 0 on the sample config.
-- Pi 5 reference deployment (DESIGN Appendix B) runs the image end-to-end.
+- `docker run ghcr.io/wowow4978-vorfeed/percept:v0.1.0 \
+      percept config-check --config /etc/percept/percept.toml`
+  exits 0 when `PERCEPT_MCP_TOKEN` and `PERCEPT_INGEST_TOKEN` are
+  passed in.
+- Pi 5 reference deployment (DESIGN Appendix B) runs the image
+  end-to-end (operator-side validation; sandbox can't reach a Pi).
 
-**Status:** ☐
+**Status:** ☑ (this PR). Tagging `v0.1.0` is the operator's call once
+the PR merges to `main`; CI does the rest.
 
 ---
 
