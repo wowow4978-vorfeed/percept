@@ -20,6 +20,24 @@ each slice — not deferred to a hypothetical cleanup slice.
 - ☐ not started
 - ◐ in progress
 - ☑ landed in `main`
+
+## Integration-test coverage per slice
+
+Every slice has at least one integration test that exercises its
+acceptance path end-to-end, in addition to per-module unit tests:
+
+| Slice | Integration test |
+|---|---|
+| 0 — scaffold | `crates/percept/tests/config_load.rs` |
+| 1 — ingest pipeline | `crates/percept-ingest/tests/http_e2e.rs` |
+| 2 — MCP server | `crates/percept/tests/mcp_e2e.rs` (initialize, tools/list, describe_sources, get_current_state) |
+| 3 — cold store + get_window | `crates/percept/tests/mcp_e2e.rs` (get_window section) |
+| 4 — vector search | `crates/percept/tests/mcp_e2e.rs` (search_events section) |
+| 5 — retention sweeper | `crates/percept/tests/retention_e2e.rs` — drives the live background `Sweeper` task |
+| 6 — MQTT + WebSocket | `crates/percept-ingest/tests/ws_e2e.rs` (live WebSocket); MQTT live broker test pulled (see slice 6) — unit tests in `mqtt::{decode,topic,router,subscriber}` cover the routing logic |
+| 7 — producer SDK | `crates/percept-client/tests/round_trip.rs` |
+| 8 — federation | `crates/percept/tests/federation_e2e.rs` |
+| 9 — container | operator-side via the release pipeline; no in-process test |
 - ⊘ descoped / superseded
 
 ---
@@ -237,7 +255,12 @@ slice-4 follow-up per "Engine deviation".
   DELETE); dry-run accurately predicts the drop without modifying state.
 - Per-source effective policy reflected in `describe_sources()`.
 
-**Status:** ☑ (this PR). Cross-DB orphan reconciliation between vectors
+**Integration test:** `crates/percept/tests/retention_e2e.rs` drives
+the live background `Sweeper` task: appends events spanning the
+cut-off, lets the sweeper fire on its cadence, asserts the right
+rows survive.
+
+**Status:** ☑. Cross-DB orphan reconciliation between vectors
 and the cold store is the one slice-5 follow-up; the rest of the in-scope
 list ships here.
 
@@ -278,18 +301,23 @@ list ships here.
   private network until v1.x ships proper TLS).
 
 **Acceptance:**
-- MQTT: 28 unit tests across decode/topic/router/subscriber (route
-  table, JSONPath kind resolution, raw/hex/csv decoders, first-match
-  wins, decode-failure counter, bus-full → consumer_drop). Live
-  integration against a real broker lives outside CI per the BLE
-  follow-up rationale.
+- MQTT: 28 unit tests across decode/topic/router/subscriber covering
+  route-table, JSONPath kind resolution, raw/hex/csv decoders,
+  first-match wins, decode-failure counter, and bus-full →
+  consumer_drop. A live `rumqttd`-broker e2e was tried and pulled —
+  rumqttd 0.19's `Broker::start()` is blocking and never returns,
+  which blocks tokio runtime drop indefinitely. The rumqttc
+  EventLoop wrapper is a thin pass-through into the unit-tested
+  `route()`; a real broker test belongs in a `cargo run --example
+  mqtt_smoke` harness that the operator runs against the Pi 5 demo.
 - WebSocket: 5 e2e tests (round-trip into hot ring, invalid bearer,
   scope deny → shed_reason, batch form, malformed JSON).
 - Unknown MQTT payload type → `messages_decode_failed` increments, no
   panic.
 
-**Status:** ☑ (this PR). BLE adapters deferred to slice-6 follow-up per
-"Slice 6 follow-up" above.
+**Status:** ☑. BLE adapters deferred to slice-6 follow-up per
+"Slice 6 follow-up" above; live MQTT broker test belongs in the
+operator-side smoke harness, not CI.
 
 ---
 
