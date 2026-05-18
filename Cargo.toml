@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/wowow4978-vorfeed/percept"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 
 [workspace.dependencies]
 percept-core = { path = "crates/core" }
