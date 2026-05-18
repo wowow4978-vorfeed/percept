@@ -10,10 +10,10 @@ repository = "https://github.com/wowow4978-vorfeed/percept"
 version = "0.1.0"
 
 [workspace.dependencies]
-percept-core = { path = "crates/percept-core" }
-percept-store = { path = "crates/percept-store" }
-percept-ingest = { path = "crates/percept-ingest" }
-percept-client = { path = "crates/percept-client" }
+percept-core = { path = "crates/core" }
+percept-store = { path = "crates/store" }
+percept-ingest = { path = "crates/ingest" }
+percept-client = { path = "crates/client" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

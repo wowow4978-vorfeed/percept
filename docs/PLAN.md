@@ -29,13 +29,13 @@ acceptance path end-to-end, in addition to per-module unit tests:
 | Slice | Integration test |
 |---|---|
 | 0 — scaffold | `crates/percept/tests/config_load.rs` |
-| 1 — ingest pipeline | `crates/percept-ingest/tests/http_e2e.rs` |
+| 1 — ingest pipeline | `crates/ingest/tests/http_e2e.rs` |
 | 2 — MCP server | `crates/percept/tests/mcp_e2e.rs` (initialize, tools/list, describe_sources, get_current_state) |
 | 3 — cold store + get_window | `crates/percept/tests/mcp_e2e.rs` (get_window section) |
 | 4 — vector search | `crates/percept/tests/mcp_e2e.rs` (search_events section) |
 | 5 — retention sweeper | `crates/percept/tests/retention_e2e.rs` — drives the live background `Sweeper` task |
-| 6 — MQTT + WebSocket | `crates/percept-ingest/tests/ws_e2e.rs` (live WebSocket); MQTT live broker test pulled (see slice 6) — unit tests in `mqtt::{decode,topic,router,subscriber}` cover the routing logic |
-| 7 — producer SDK | `crates/percept-client/tests/round_trip.rs` |
+| 6 — MQTT + WebSocket | `crates/ingest/tests/ws_e2e.rs` (live WebSocket); MQTT live broker test pulled (see slice 6) — unit tests in `mqtt::{decode,topic,router,subscriber}` cover the routing logic |
+| 7 — producer SDK | `crates/client/tests/round_trip.rs` |
 | 8 — federation | `crates/percept/tests/federation_e2e.rs` |
 | 9 — container | operator-side via the release pipeline; no in-process test |
 - ⊘ descoped / superseded
