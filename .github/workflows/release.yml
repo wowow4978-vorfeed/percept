@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   build:
-    if: hashFiles('**/Cargo.toml') != ''
     strategy:
       fail-fast: false
       matrix:
@@ -45,7 +44,6 @@ jobs:
           path: dist/
 
   release:
-    if: hashFiles('**/Cargo.toml') != ''
     needs: build
     runs-on: ubuntu-24.04
     steps:
@@ -62,7 +60,6 @@ jobs:
           generate_release_notes: true
 
   container:
-    if: hashFiles('Dockerfile') != ''
     needs: build
     runs-on: ubuntu-24.04
     steps:
