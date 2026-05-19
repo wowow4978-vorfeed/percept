@@ -1,7 +1,7 @@
 # Percept
 
 [![CI](https://github.com/wowow4978-vorfeed/percept/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wowow4978-vorfeed/percept/actions/workflows/ci.yml)
-[![Release](https://github.com/wowow4978-vorfeed/percept/actions/workflows/release.yml/badge.svg)](https://github.com/wowow4978-vorfeed/percept/actions/workflows/release.yml)
+[![Release](https://img.shields.io/github/v/release/wowow4978-vorfeed/percept?include_prereleases&label=release&sort=semver)](https://github.com/wowow4978-vorfeed/percept/releases)
 
 Local-first event-aggregation server for LLM agents. Producers (sensors,
 services, scripts) push structured events; Percept normalises and retains
